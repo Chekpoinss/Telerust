@@ -1,0 +1,16 @@
+[package]
+name = "telerust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+adw.workspace = true
+async-channel.workspace = true
+gtk.workspace = true
+telerust-tdlib-bridge = { path = "../../crates/tdlib-bridge" }
+telerust-client-core = { path = "../../crates/client-core" }
+
+[lints]
+workspace = true

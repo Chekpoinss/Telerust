@@ -1,0 +1,12 @@
+/target/
+/dist/
+*.swp
+*.swo
+.env
+.env.*
+!.env.example
+config.toml
+**/config.toml
+*.session
+*.tdb
+*.tdb-journal
