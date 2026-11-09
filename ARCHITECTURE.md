@@ -55,7 +55,7 @@ TDLib может обслуживать базовые Telegram-функции �
 | Slint | GPLv3, royalty-free или коммерческие варианты с отдельными условиями | Уточнить применимый текст лицензии и обязанности attribution/исходников до выбора. |
 | Paper Plane | GPL-3.0 | Использовать как архитектурный референс; не переносить код без соблюдения условий GPL и notices. |
 
-Текущая декларация `license` в workspace — предварительное значение для начального scaffold, а не окончательное лицензионное решение. До релиза нужно решить лицензию проекта и добавить соответствующий текст LICENSE, NOTICE и inventory всех прямых/транзитивных компонентов.
+Workspace использует GPL-3.0-or-later. После проверки исходников, Cargo metadata и native runtime компонентов подтверждены текст лицензии в `LICENSE` и inventory/атрибуции в `THIRD_PARTY_NOTICES.md`.
 
 ### Нагрузка: что известно и что измерять
 
@@ -63,8 +63,14 @@ TDLib может обслуживать базовые Telegram-функции �
 
 ## Текущий разрыв между ADR и прототипом
 
-Реализация пока покрывает только телефонные auth prompts, чат-лист, одну страницу истории и явную отправку текста. QR auth и смена auth-метода, logout/reset session, полноценные retry/error transitions и chat search отсутствуют. История рендерится через `GtkListBox` и при обновлении строки пересоздаются; виртуализации нет. Поэтому архитектурные пункты выше описывают выбранные границы и будущие требования, а не полностью реализованные свойства приложения. Сетевой E2E без отдельного тестового аккаунта не проверен.
+Реализация покрывает QR/phone auth prompts, чат-лист, одну страницу истории и явную отправку текста. Logout подключён. Полноценные retry/error transitions и chat search отсутствуют. История рендерится через `GtkListBox` и при обновлении строки пересоздаются; виртуализации нет. Поэтому архитектурные пункты выше описывают выбранные границы и будущие требования, а не полностью реализованные свойства приложения. Сетевой E2E без отдельного тестового аккаунта не проверен.
 
 Очередь событий ограничена 256 элементами, но backend публикует через блокирующий `send_blocking`; при замедлении UI это создаёт backpressure, который следует проверить на синтетическом update потоке до утверждения устойчивости под нагрузкой.
+
+## Auth QR и logout (2026-11-10)
+
+- При `authorizationStateWaitPhoneNumber` backend по умолчанию запрашивает QR через TDLib `requestQrCodeAuthentication`. Только `authorizationStateWaitOtherDeviceConfirmation.link` принимается как QR payload; GUI проверяет `tg://login?token=` и кодирует ссылку библиотекой `qrcode`. TDLib отправляет новые auth-state updates при обновлении ссылки; каждый update перерисовывает матрицу. Токен не пишется в лог.
+- Переключение из QR в phone login вызывает TDLib `destroy` для ещё не авторизованного инстанса и перезапускает его с телефонным prompt. Из phone/code/password в QR вызывает `requestQrCodeAuthentication` напрямую; TDLib разрешает вызов в документированных auth states.
+- Logout использует TDLib `logOut`, который по схеме TDLib завершает инстанс и удаляет локальные данные. После `authorizationStateClosed` bridge удаляет свой encryption key из Secret Service и создаёт новый TDLib instance для следующего входа. Если app завершается в процессе logout, серверное завершение может не успеть.
 
 Источники по интерфейсам и обязательным ограничениям: [TDLib C JSON ABI](https://core.telegram.org/tdlib/docs/td__json__client_8h.html), [TDLib async/update model](https://core.telegram.org/tdlib/getting-started), [Telegram API Terms](https://core.telegram.org/api/terms), [спонсируемые сообщения и тестовый канал](https://core.telegram.org/api/sponsored-messages), [GTK Rust bindings](https://www.gtk.org/docs/language-bindings/rust/), [Slint licensing](https://slint.dev/faqs).

@@ -10,3 +10,4 @@ config.toml
 *.session
 *.tdb
 *.tdb-journal
+*.log

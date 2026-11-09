@@ -44,6 +44,7 @@ pub enum AuthPrompt {
 #[derive(Debug, Clone)]
 pub enum BackendEvent {
     Authorization(AuthorizationState),
+    QrLink(String),
     Prompt(AuthPrompt),
     Chats(Vec<ChatSummary>),
     History {
@@ -60,6 +61,9 @@ pub enum BackendEvent {
 
 #[derive(Debug, Clone)]
 pub enum BackendCommand {
+    RequestQr,
+    UsePhone,
+    Logout,
     PhoneNumber(String),
     Code(String),
     Password(String),
@@ -115,9 +119,16 @@ pub fn probe_tdlib_library(path: &Path) -> Result<(), &'static str> {
 }
 
 fn run(settings: Settings, commands: Receiver<BackendCommand>, events: Sender<BackendEvent>) {
-    let result = run_inner(settings, &commands, &events);
-    if let Err(error) = result {
-        let _ = events.send_blocking(BackendEvent::Error(error.to_string()));
+    let mut prefer_qr = true;
+    loop {
+        match run_inner(settings.clone(), &commands, &events, &mut prefer_qr) {
+            Ok(true) => continue,
+            Ok(false) => break,
+            Err(error) => {
+                let _ = events.send_blocking(BackendEvent::Error(error.to_string()));
+                break;
+            }
+        }
     }
 }
 
@@ -152,7 +163,8 @@ fn run_inner(
     settings: Settings,
     commands: &Receiver<BackendCommand>,
     events: &Sender<BackendEvent>,
-) -> Result<(), BackendError> {
+    prefer_qr: &mut bool,
+) -> Result<bool, BackendError> {
     let environment = if settings.use_test_dc { "test" } else { "prod" };
     let db_dir = data_path().join(format!("tdlib-{environment}"));
     std::fs::create_dir_all(&db_dir).map_err(|_| BackendError::Storage)?;
@@ -173,22 +185,41 @@ fn run_inner(
     let mut chats: HashMap<i64, ChatSummary> = HashMap::new();
     let mut selected_chat = None;
     let mut closed = false;
+    let mut restart = false;
     while !closed {
         if let Some(update) = client.receive(0.2) {
             handle_update(
                 &mut client,
                 update,
-                &settings,
-                &db_dir,
-                &key,
-                &mut chats,
-                &mut selected_chat,
-                events,
-                &mut closed,
+                UpdateContext {
+                    settings: &settings,
+                    db_dir: &db_dir,
+                    key: &key,
+                    chats: &mut chats,
+                    selected_chat: &mut selected_chat,
+                    events,
+                    closed: &mut closed,
+                    prefer_qr,
+                },
             );
         }
         while let Ok(command) = commands.try_recv() {
             match command {
+                BackendCommand::RequestQr => {
+                    *prefer_qr = true;
+                    client
+                        .send(&json!({"@type":"requestQrCodeAuthentication","other_user_ids":[]}));
+                }
+                BackendCommand::UsePhone => {
+                    *prefer_qr = false;
+                    client.send(&json!({"@type":"destroy"}));
+                    restart = true;
+                }
+                BackendCommand::Logout => {
+                    *prefer_qr = true;
+                    client.send(&json!({"@type":"logOut"}));
+                    restart = true;
+                }
                 BackendCommand::PhoneNumber(phone) => {
                     client.send(
                         &json!({"@type":"setAuthenticationPhoneNumber","phone_number":phone}),
@@ -237,6 +268,7 @@ fn run_inner(
                     }
                 }
                 BackendCommand::Shutdown => {
+                    restart = false;
                     close_client(&mut client);
                     closed = true;
                     break;
@@ -244,11 +276,28 @@ fn run_inner(
             }
         }
         if commands.is_closed() {
+            restart = false;
             close_client(&mut client);
             closed = true;
         }
     }
-    Ok(())
+    if restart {
+        let entry = keyring::Entry::new(
+            "org.telerust.Session",
+            &format!("tdlib-db-key-{}-{environment}", settings.api_id),
+        )
+        .map_err(|_| BackendError::Keyring)?;
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(_) => {
+                let _ = events.send_blocking(BackendEvent::Error(
+                    "TDLib logged out, but its database key could not be removed from Secret Service.".into(),
+                ));
+                return Err(BackendError::Keyring);
+            }
+        }
+    }
+    Ok(restart)
 }
 
 fn close_client(client: &mut TdClient) {
@@ -268,23 +317,58 @@ fn close_client(client: &mut TdClient) {
     }
 }
 
-fn handle_update(
-    client: &mut TdClient,
-    update: Value,
-    settings: &Settings,
-    db_dir: &Path,
-    key: &str,
-    chats: &mut HashMap<i64, ChatSummary>,
-    selected_chat: &mut Option<i64>,
-    events: &Sender<BackendEvent>,
-    closed: &mut bool,
-) {
+struct UpdateContext<'a> {
+    settings: &'a Settings,
+    db_dir: &'a Path,
+    key: &'a str,
+    chats: &'a mut HashMap<i64, ChatSummary>,
+    selected_chat: &'a mut Option<i64>,
+    events: &'a Sender<BackendEvent>,
+    closed: &'a mut bool,
+    prefer_qr: &'a mut bool,
+}
+
+fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_>) {
+    let UpdateContext {
+        settings,
+        db_dir,
+        key,
+        chats,
+        selected_chat,
+        events,
+        closed,
+        prefer_qr,
+    } = context;
     match update.get("@type").and_then(Value::as_str).unwrap_or("") {
         "updateAuthorizationState" => {
             let state = update
                 .pointer("/authorization_state/@type")
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            match authorization_state_from_tdlib(state) {
+                AuthorizationState::WaitingForQrConfirmation => {
+                    let link = update
+                        .pointer("/authorization_state/link")
+                        .and_then(Value::as_str);
+                    if let Some(link) = link.filter(|link| link.starts_with("tg://login?token=")) {
+                        let _ = events.send_blocking(BackendEvent::QrLink(link.to_owned()));
+                        let _ = events.send_blocking(BackendEvent::Authorization(
+                            AuthorizationState::WaitingForQrConfirmation,
+                        ));
+                    } else {
+                        let _ = events.send_blocking(BackendEvent::Error(
+                            "Telegram returned an invalid QR login link.".into(),
+                        ));
+                    }
+                    return;
+                }
+                AuthorizationState::LoggingOut => {
+                    let _ = events
+                        .send_blocking(BackendEvent::Authorization(AuthorizationState::LoggingOut));
+                    return;
+                }
+                _ => {}
+            }
             let (mapped, prompt) = match state {
                 "authorizationStateWaitTdlibParameters" => {
                     client.send(&json!({
@@ -306,10 +390,18 @@ fn handle_update(
                         .send(&json!({"@type":"checkDatabaseEncryptionKey","encryption_key":key}));
                     (AuthorizationState::WaitingForParameters, None)
                 }
-                "authorizationStateWaitPhoneNumber" => (
-                    AuthorizationState::WaitingForPhoneNumber,
-                    Some(AuthPrompt::PhoneNumber),
-                ),
+                "authorizationStateWaitPhoneNumber" => {
+                    if *prefer_qr {
+                        client.send(
+                            &json!({"@type":"requestQrCodeAuthentication","other_user_ids":[]}),
+                        );
+                        return;
+                    }
+                    (
+                        AuthorizationState::WaitingForPhoneNumber,
+                        Some(AuthPrompt::PhoneNumber),
+                    )
+                }
                 "authorizationStateWaitCode" => {
                     (AuthorizationState::WaitingForCode, Some(AuthPrompt::Code))
                 }
@@ -424,6 +516,28 @@ fn handle_update(
             )));
         }
         _ => {}
+    }
+}
+
+fn authorization_state_from_tdlib(state: &str) -> AuthorizationState {
+    match state {
+        "authorizationStateWaitTdlibParameters" | "authorizationStateWaitEncryptionKey" => {
+            AuthorizationState::WaitingForParameters
+        }
+        "authorizationStateWaitPhoneNumber"
+        | "authorizationStateWaitEmailAddress"
+        | "authorizationStateWaitRegistration" => AuthorizationState::WaitingForPhoneNumber,
+        "authorizationStateWaitCode" | "authorizationStateWaitEmailCode" => {
+            AuthorizationState::WaitingForCode
+        }
+        "authorizationStateWaitPassword" => AuthorizationState::WaitingForPassword,
+        "authorizationStateWaitOtherDeviceConfirmation" => {
+            AuthorizationState::WaitingForQrConfirmation
+        }
+        "authorizationStateReady" => AuthorizationState::Ready,
+        "authorizationStateLoggingOut" => AuthorizationState::LoggingOut,
+        "authorizationStateClosed" => AuthorizationState::Closed,
+        _ => AuthorizationState::WaitingForParameters,
     }
 }
 
@@ -639,6 +753,34 @@ impl TdClient {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tdlib_authorization_states_map_to_the_expected_ui_transitions() {
+        assert_eq!(
+            authorization_state_from_tdlib("authorizationStateWaitOtherDeviceConfirmation"),
+            AuthorizationState::WaitingForQrConfirmation
+        );
+        assert_eq!(
+            authorization_state_from_tdlib("authorizationStateWaitCode"),
+            AuthorizationState::WaitingForCode
+        );
+        assert_eq!(
+            authorization_state_from_tdlib("authorizationStateWaitPassword"),
+            AuthorizationState::WaitingForPassword
+        );
+        assert_eq!(
+            authorization_state_from_tdlib("authorizationStateReady"),
+            AuthorizationState::Ready
+        );
+        assert_eq!(
+            authorization_state_from_tdlib("authorizationStateLoggingOut"),
+            AuthorizationState::LoggingOut
+        );
+        assert_eq!(
+            authorization_state_from_tdlib("authorizationStateClosed"),
+            AuthorizationState::Closed
+        );
+    }
 
     #[test]
     fn parses_text_message_without_logging_or_network() {

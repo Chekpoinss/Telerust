@@ -9,6 +9,7 @@ license.workspace = true
 adw.workspace = true
 async-channel.workspace = true
 gtk.workspace = true
+qrcode.workspace = true
 telerust-tdlib-bridge = { path = "../../crates/tdlib-bridge" }
 telerust-client-core = { path = "../../crates/client-core" }
 

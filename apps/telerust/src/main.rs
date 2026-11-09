@@ -17,6 +17,10 @@ struct Ui {
     auth_input: gtk::Entry,
     auth_password: gtk::Entry,
     auth_button: gtk::Button,
+    qr_area: gtk::DrawingArea,
+    use_phone_button: gtk::Button,
+    use_qr_button: gtk::Button,
+    logout_button: gtk::Button,
     current_prompt: Rc<RefCell<AuthPrompt>>,
     chats: gtk::ListBox,
     messages: gtk::ListBox,
@@ -60,7 +64,16 @@ fn build_window(app: &adw::Application) {
         .build();
     content.append(&stack);
 
-    let (login_page, auth_title, auth_input, auth_password, auth_button) = login_view();
+    let (
+        login_page,
+        auth_title,
+        auth_input,
+        auth_password,
+        auth_button,
+        qr_area,
+        use_phone_button,
+        use_qr_button,
+    ) = login_view();
     stack.add_named(&login_page, Some("login"));
     let main_page = main_view();
     stack.add_named(&main_page.0, Some("main"));
@@ -74,6 +87,10 @@ fn build_window(app: &adw::Application) {
         auth_input,
         auth_password,
         auth_button,
+        qr_area,
+        use_phone_button,
+        use_qr_button,
+        logout_button: main_page.5,
         current_prompt: Rc::new(RefCell::new(AuthPrompt::PhoneNumber)),
         chats: main_page.1,
         messages: main_page.2,
@@ -85,6 +102,7 @@ fn build_window(app: &adw::Application) {
 
     wire_auth(&ui);
     wire_messages(&ui);
+    wire_logout(&ui);
     attach_events(&ui, event_rx);
 
     let command_tx = ui.command_tx.clone();
@@ -119,7 +137,16 @@ fn start_backend() -> (
     }
 }
 
-fn login_view() -> (gtk::Box, gtk::Label, gtk::Entry, gtk::Entry, gtk::Button) {
+fn login_view() -> (
+    gtk::Box,
+    gtk::Label,
+    gtk::Entry,
+    gtk::Entry,
+    gtk::Button,
+    gtk::DrawingArea,
+    gtk::Button,
+    gtk::Button,
+) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     outer.set_halign(gtk::Align::Center);
     outer.set_valign(gtk::Align::Center);
@@ -138,6 +165,22 @@ fn login_view() -> (gtk::Box, gtk::Label, gtk::Entry, gtk::Entry, gtk::Button) {
     disclosure.set_margin_bottom(20);
     outer.append(&disclosure);
 
+    let qr_help = gtk::Label::new(Some(
+        "Scan with Telegram on your phone: Settings → Devices → Link Desktop Device.",
+    ));
+    qr_help.set_wrap(true);
+    qr_help.set_justify(gtk::Justification::Center);
+    outer.append(&qr_help);
+    let qr_area = gtk::DrawingArea::new();
+    qr_area.set_content_width(280);
+    qr_area.set_content_height(280);
+    qr_area.set_size_request(280, 280);
+    qr_area.set_halign(gtk::Align::Center);
+    qr_area.set_margin_top(12);
+    qr_area.set_margin_bottom(12);
+    outer.append(&qr_area);
+    qr_area.set_visible(false);
+
     let prompt = gtk::Label::new(Some("Loading TDLib authorization state…"));
     prompt.set_xalign(0.0);
     outer.append(&prompt);
@@ -145,6 +188,7 @@ fn login_view() -> (gtk::Box, gtk::Label, gtk::Entry, gtk::Entry, gtk::Button) {
     input.set_placeholder_text(Some("Phone number"));
     input.set_margin_top(8);
     outer.append(&input);
+    input.set_visible(false);
     let password = gtk::Entry::new();
     password.set_placeholder_text(Some("Two-step verification password"));
     password.set_visibility(false);
@@ -155,7 +199,15 @@ fn login_view() -> (gtk::Box, gtk::Label, gtk::Entry, gtk::Entry, gtk::Button) {
     button.add_css_class("suggested-action");
     button.set_margin_top(12);
     outer.append(&button);
-    (outer, prompt, input, password, button)
+    button.set_visible(false);
+    let use_phone = gtk::Button::with_label("Use phone number instead");
+    outer.append(&use_phone);
+    let use_qr = gtk::Button::with_label("Use QR code instead");
+    use_qr.set_visible(false);
+    outer.append(&use_qr);
+    (
+        outer, prompt, input, password, button, qr_area, use_phone, use_qr,
+    )
 }
 
 // Return page plus widgets which need event updates.
@@ -165,19 +217,26 @@ fn main_view() -> (
     gtk::ListBox,
     gtk::Entry,
     gtk::Button,
+    gtk::Button,
 ) {
     let split = gtk::Paned::new(gtk::Orientation::Horizontal);
     split.set_position(320);
     split.set_wide_handle(true);
 
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let heading_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    heading_row.set_margin_start(12);
+    heading_row.set_margin_end(12);
+    heading_row.set_margin_top(12);
+    heading_row.set_margin_bottom(8);
     let heading = gtk::Label::new(Some("Chats"));
     heading.add_css_class("title-2");
     heading.set_xalign(0.0);
-    heading.set_margin_start(12);
-    heading.set_margin_top(12);
-    heading.set_margin_bottom(8);
-    sidebar.append(&heading);
+    heading.set_hexpand(true);
+    let logout = gtk::Button::with_label("Log out");
+    heading_row.append(&heading);
+    heading_row.append(&logout);
+    sidebar.append(&heading_row);
     let chats = gtk::ListBox::new();
     chats.set_selection_mode(gtk::SelectionMode::Single);
     chats.add_css_class("boxed-list");
@@ -216,7 +275,19 @@ fn main_view() -> (
 
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.append(&split);
-    (page, chats, messages, composer, send)
+    (page, chats, messages, composer, send, logout)
+}
+
+fn wire_logout(ui: &Ui) {
+    let tx = ui.command_tx.clone();
+    let status = ui.status.clone();
+    ui.logout_button.connect_clicked(move |_| {
+        if tx.try_send(BackendCommand::Logout).is_ok() {
+            status.set_text("Logging out and clearing local TDLib data…");
+        } else {
+            status.set_text("Could not start logout. Try again.");
+        }
+    });
 }
 
 fn wire_auth(ui: &Ui) {
@@ -259,6 +330,28 @@ fn wire_auth(ui: &Ui) {
     ui.auth_button.connect_clicked(move |_| on_click());
     let on_enter = submit;
     ui.auth_input.connect_activate(move |_| on_enter());
+
+    let tx = ui.command_tx.clone();
+    let status = ui.status.clone();
+    ui.use_phone_button.connect_clicked(move |_| {
+        if tx.try_send(BackendCommand::UsePhone).is_ok() {
+            status.set_text("Switching to phone number sign-in…");
+        } else {
+            status.set_text("Could not switch sign-in method. Try again.");
+        }
+    });
+
+    let tx = ui.command_tx.clone();
+    let status = ui.status.clone();
+    let qr_area = ui.qr_area.clone();
+    ui.use_qr_button.connect_clicked(move |_| {
+        if tx.try_send(BackendCommand::RequestQr).is_ok() {
+            qr_area.set_visible(true);
+            status.set_text("Requesting a QR code from Telegram…");
+        } else {
+            status.set_text("Could not request QR sign-in. Try again.");
+        }
+    });
 }
 
 fn wire_messages(ui: &Ui) {
@@ -306,12 +399,36 @@ fn attach_events(ui: &Ui, events: async_channel::Receiver<BackendEvent>) {
                     ui.status
                         .set_text("Connected. Messages are sent only after you press Send.");
                 }
-                BackendEvent::Authorization(state) => {
-                    ui.status.set_text(match state {
-                        AuthorizationState::Closed => "TDLib session closed.",
-                        _ => "Connecting to Telegram test servers…",
-                    });
-                }
+                BackendEvent::Authorization(state) => match state {
+                    AuthorizationState::Closed => {
+                        ui.stack.set_visible_child_name("login");
+                        clear_list(&ui.chats);
+                        clear_list(&ui.messages);
+                        ui.status.set_text("Session closed. Preparing sign-in…");
+                    }
+                    AuthorizationState::LoggingOut => {
+                        ui.status.set_text("Telegram is closing the session…");
+                    }
+                    AuthorizationState::WaitingForQrConfirmation => {
+                        ui.status
+                            .set_text("Scan this QR code with Telegram on your phone.");
+                    }
+                    _ => ui.status.set_text("Connecting to Telegram test servers…"),
+                },
+                BackendEvent::QrLink(link) => match render_qr(&ui.qr_area, &link) {
+                    Ok(()) => {
+                        ui.qr_area.set_visible(true);
+                        ui.auth_input.set_visible(false);
+                        ui.auth_password.set_visible(false);
+                        ui.auth_button.set_visible(false);
+                        ui.use_phone_button.set_visible(true);
+                        ui.use_qr_button.set_visible(false);
+                        ui.auth_title.set_text("Scan to sign in");
+                    }
+                    Err(()) => ui
+                        .status
+                        .set_text("Telegram returned an invalid QR login link."),
+                },
                 BackendEvent::Prompt(prompt) => set_prompt(&ui, prompt),
                 BackendEvent::Chats(chats) => render_chats(
                     &ui.chats,
@@ -357,9 +474,16 @@ fn set_prompt(ui: &Ui, prompt: AuthPrompt) {
         ),
     };
     ui.auth_title.set_text(text);
+    ui.qr_area.set_visible(false);
     ui.auth_input.set_placeholder_text(Some(placeholder));
     ui.auth_input.set_visible(!password);
     ui.auth_password.set_visible(password);
+    ui.auth_button.set_visible(!matches!(
+        prompt,
+        AuthPrompt::Registration | AuthPrompt::Other(_)
+    ));
+    ui.use_phone_button.set_visible(false);
+    ui.use_qr_button.set_visible(true);
     *ui.current_prompt.borrow_mut() = prompt;
     ui.status
         .set_text("Enter the requested value. The app does not log credentials.");
@@ -452,5 +576,71 @@ fn append_info(list: &gtk::ListBox, text: &str) {
 fn clear_list(list: &gtk::ListBox) {
     while let Some(child) = list.first_child() {
         list.remove(&child);
+    }
+}
+
+fn render_qr(area: &gtk::DrawingArea, link: &str) -> Result<(), ()> {
+    let matrix = qr_matrix(link)?;
+    area.set_draw_func(move |_, context, width, height| {
+        let width = f64::from(width);
+        let height = f64::from(height);
+        let modules = matrix.len() + 8;
+        let scale = (width.min(height) / modules as f64).floor().max(1.0);
+        let size = modules as f64 * scale;
+        let left = (width - size) / 2.0;
+        let top = (height - size) / 2.0;
+        context.set_source_rgb(1.0, 1.0, 1.0);
+        let _ = context.paint();
+        context.set_source_rgb(0.0, 0.0, 0.0);
+        context.new_path();
+        for (y, row) in matrix.iter().enumerate() {
+            for (x, dark) in row.iter().enumerate() {
+                if *dark {
+                    context.rectangle(
+                        left + (x + 4) as f64 * scale,
+                        top + (y + 4) as f64 * scale,
+                        scale,
+                        scale,
+                    );
+                }
+            }
+        }
+        let _ = context.fill();
+    });
+    area.queue_draw();
+    Ok(())
+}
+
+fn qr_matrix(link: &str) -> Result<Vec<Vec<bool>>, ()> {
+    if !link.starts_with("tg://login?token=") || link.len() > 4096 {
+        return Err(());
+    }
+    let code = qrcode::QrCode::new(link.as_bytes()).map_err(|_| ())?;
+    let width = code.width();
+    Ok((0..width)
+        .map(|y| {
+            (0..width)
+                .map(|x| code[(x, y)] == qrcode::Color::Dark)
+                .collect()
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::qr_matrix;
+
+    #[test]
+    fn tdlib_login_link_becomes_a_square_qr_matrix() {
+        let matrix = qr_matrix("tg://login?token=SYNTHETIC_TEST_TOKEN").unwrap();
+        assert!(matrix.len() >= 21);
+        assert!(matrix.iter().all(|row| row.len() == matrix.len()));
+        assert!(matrix.iter().flatten().any(|dark| *dark));
+    }
+
+    #[test]
+    fn qr_matrix_rejects_non_tdlib_links_and_oversized_values() {
+        assert!(qr_matrix("https://example.invalid/QR").is_err());
+        assert!(qr_matrix(&format!("tg://login?token={}", "x".repeat(4096))).is_err());
     }
 }

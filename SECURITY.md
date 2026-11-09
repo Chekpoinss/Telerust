@@ -19,6 +19,7 @@ Telegram auth key/session, локальная база TDLib, сообщения
 - Не изобретать и не портировать самостоятельно криптографию Telegram. Передавать криптографические операции TDLib.
 - Настоящие аккаунты/сессии никогда не входят в тесты, фикстуры, CI, screenshots или bug reports. Использовать synthetic fixtures и stub backend.
 - `api_id`/`api_hash` читать только из config-файла с правами `0600`; не хранить в git, аргументах процессов или логах. Session database encryption key создавать через OS CSPRNG и сохранять в GNOME Secret Service; при недоступности keyring не продолжать без шифрования.
+- Явный Logout выполняет TDLib `logOut` (удаляет локальные данные TDLib после сетевого завершения), затем bridge удаляет свой database key из Secret Service. Конфигурация приложения с `api_id`/`api_hash` не удаляется, поскольку это credentials приложения, а не пользовательская сессия.
 - Каталог test/prod базы TDLib и файлы медиа размещать раздельно, закрыть доступ режимом `0700`. Не использовать реальные пользовательские данные в test DC.
 - Устанавливать уровень логирования TDLib 0 и пустой log stream до инициализации instance. Не журналировать JSON запросы/ответы и сообщения.
 - Любой `unsafe` остаётся в выделенном crate, с локальным `// SAFETY:` объяснением инвариантов, проверками длины/NUL/UTF-8, валидным ownership и отдельной ревизией.
@@ -41,4 +42,4 @@ Telegram auth key/session, локальная база TDLib, сообщения
 
 ## Публикация
 
-Cargo manifests пока объявляют `GPL-3.0-or-later`, но в рабочем дереве отсутствуют LICENSE/NOTICE и не выполнена инвентаризация лицензий прямых и транзитивных зависимостей. До документированного решения и добавления соответствующих лицензионных файлов публикация исходников запрещена правилами проекта. В текущей среде нет Git history или существующего GitHub-репозитория Telerust; перед первым push проверить staged tree и новый commit на credentials, TDLib session/data files, логи и build artifacts.
+Лицензия проекта подтверждена как GPL-3.0-or-later; текст находится в `LICENSE`, inventory и атрибуции — в `THIRD_PARTY_NOTICES.md`. До первого push проверить весь staged tree и историю на credentials, TDLib session/data files, логи и build artifacts.

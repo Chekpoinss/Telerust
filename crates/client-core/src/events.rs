@@ -18,6 +18,8 @@ pub enum AuthorizationState {
     WaitingForPhoneNumber,
     WaitingForCode,
     WaitingForPassword,
+    WaitingForQrConfirmation,
     Ready,
+    LoggingOut,
     Closed,
 }
