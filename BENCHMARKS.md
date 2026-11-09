@@ -24,7 +24,7 @@
 5. Изображение thumbnail и большой файл через synthetic/local fixture, отдельно сетевое время.
 6. Поток синтетических updates при закрытом/открытом чате для проверки backpressure.
 
-Использовать системные инструменты (`/usr/bin/time -v`, `ps`, `pidstat`, `perf`, GNOME Sysprof) и собственные timestamps/trace spans; инструмент и версия должны быть указаны. Измерения не должны содержать содержимое сообщений, credentials или идентификаторы реальных пользователей.
+Использовать системные инструменты (`/usr/bin/time -v`, `ps`, `pidstat`, `perf`, GNOME Sysprof) и собственные timestamps/trace spans; инструмент и версия должны быть указаны. `scripts/measure-gui-idle.sh` фиксирует RSS/HWM, PSS из `smaps_rollup`, USS как сумму private clean/dirty/hugetlb страниц и средний CPU процесса за интервал. Измерения не должны содержать содержимое сообщений, credentials или идентификаторы реальных пользователей.
 
 ## Текущий замер прототипа
 
@@ -40,4 +40,10 @@
 
 ## 2026-11-10: текущая итерация
 
-Актуальные RAM/CPU, PSS/USS, холодный запуск и сценарии с чатами не измерялись. Живая авторизация не настроена, поэтому chat/authorized-session нагрузку нельзя замерить достоверно. Предыдущая таблица не переносится на текущий бинарник. На Fedora 45 Wayland release binary и установленный launcher удерживали окно 8 секунд при timeout smoke check; `desktop-file-validate` прошёл. Скриншотный осмотр GNOME меню/окна не выполнялся.
+Один UI-only прогон текущей debug-сборки на Fedora 45 x86_64 GNOME Wayland, GTK 4.24.1/libadwaita 1.10, без настроек и TDLib worker. Команда: `env XDG_CONFIG_HOME=/tmp/telerust-benchmark-config XDG_DATA_HOME=/tmp/telerust-benchmark-data ./scripts/measure-gui-idle.sh 10`.
+
+| Дата | Сценарий | RSS / HWM | PSS | USS | Средний CPU |
+|---|---|---:|---:|---:|---:|
+| 2026-11-10 | Окно auth UI, без config/backend, 10 s после 2 s запуска | 174328 KiB | 86828 KiB | 47816 KiB | 0.100% |
+
+Это один диагностический прогон, не baseline с разбросом. Измерены только окно авторизации и отсутствие backend; нет времён до первой отрисовки, открытого чата, TDLib sync, сети и сессии. На Fedora 45 Wayland release binary и установленный launcher также удерживали окно 8 секунд при timeout smoke check; `desktop-file-validate` прошёл. Скриншотный осмотр GNOME меню/окна не выполнялся.

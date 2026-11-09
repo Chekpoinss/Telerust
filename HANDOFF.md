@@ -19,6 +19,7 @@
 - TDLib smoke probe прошёл: `/tmp/telerust-tdlib/libtdjson.so` загрузилась и ответила на начальное состояние без авторизации/сети.
 - Fedora 45 Wayland: release executable и затем установленный launcher открыты 8 секунд с изолированными пустыми XDG config/data путями; оба завершены `timeout` (ожидаемый код 124), окна не закрылись сами и в stderr не было ошибок. Это подтверждает запуск процесса/GUI, не визуальную отрисовку/сканирование QR.
 - User-local install выполнен. `desktop-file-validate ~/.local/share/applications/org.telerust.Client.desktop` прошёл; desktop entry, launcher, binary и SVG icon установлены.
+- Один UI-only idle прогон (`scripts/measure-gui-idle.sh 10`, изолированные пустые XDG dirs): RSS/HWM 174328 KiB, PSS 86828 KiB, USS 47816 KiB, CPU 0.100%. Подробности и ограничения в `BENCHMARKS.md`.
 - `git diff --check` прошёл; быстрый поиск credentials/телефонов/QR tokens в изменённых файлах нашёл только synthetic test fixtures.
 
 ## Не проверено

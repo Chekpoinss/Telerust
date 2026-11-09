@@ -32,13 +32,20 @@ end_time=$(date +%s%N)
 read -r end_user end_system < <(awk '{print $14, $15}' "/proc/$app_pid/stat")
 rss_kib=$(awk '/^VmRSS:/ {print $2}' "/proc/$app_pid/status")
 hwm_kib=$(awk '/^VmHWM:/ {print $2}' "/proc/$app_pid/status")
+read -r pss_kib private_clean_kib private_dirty_kib private_hugetlb_kib < <(
+  awk '/^(Pss|Private_Clean|Private_Dirty|Private_Hugetlb):/ { values[$1]=$2 }
+    END { printf "%s %s %s %s\n", values["Pss:"], values["Private_Clean:"],
+      values["Private_Dirty:"], values["Private_Hugetlb:"] }' "/proc/$app_pid/smaps_rollup"
+)
+uss_kib=$((private_clean_kib + private_dirty_kib + private_hugetlb_kib))
 ticks=$(getconf CLK_TCK)
 awk -v u="$start_user" -v s="$start_system" -v ue="$end_user" -v se="$end_system" \
   -v tick="$ticks" -v start="$start_time" -v end="$end_time" \
-  -v rss="$rss_kib" -v hwm="$hwm_kib" 'BEGIN {
+  -v rss="$rss_kib" -v hwm="$hwm_kib" -v pss="$pss_kib" -v uss="$uss_kib" 'BEGIN {
     elapsed=(end-start)/1000000000
     cpu=((ue-u)+(se-s))/tick/elapsed*100
     printf "Scenario: UI-only, no account config / no TDLib worker\n"
     printf "Window RSS: %s KiB\nWindow HWM: %s KiB\n", rss, hwm
+    printf "Window PSS: %s KiB\nWindow USS: %s KiB\n", pss, uss
     printf "Mean process CPU over %.1f s: %.3f%%\n", elapsed, cpu
   }'
