@@ -18,19 +18,19 @@
 - Старая первопричина: config не задавал `tdlib_library`, поиск не включал user-local каталог, а GTK затирал backend error после закрытия event channel.
 - TDLib из ранее собранного `/tmp/telerust-tdlib/libtdjson.so`: версия `1.8.67`, ELF x86_64; `ldd -r` без неразрешённых зависимостей/символов; ABI probe прошёл. Та же библиотека скопирована и повторно проверена в `$XDG_DATA_HOME/telerust/lib/libtdjson.so`; `/tmp` больше не нужен для запуска.
 - Прямое подключение к Telegram endpoint в этой сети не проходило. После использования настроенного GNOME proxy TDLib установила соединение с production DC и получила настоящий `authorizationStateWaitOtherDeviceConfirmation.link`.
-- Обновлённая release app запущена через установленный launcher. Доступное GTK UI показывает `Scan to sign in` и `Scan this QR code…`; link не выводился и не сохранялся отдельно. Окно оставлено открытым для ручного сканирования.
+- Обновлённая release app запущена через установленный launcher. Доступное GTK UI показало `Scan to sign in` и `Scan this QR code…`; link не выводился и не сохранялся отдельно. Позже окно перешло в `Connected` и `Chats`, что подтверждает authorization-ready state и открытие списка. Названия чатов/сообщения не читались, сообщения не отправлялись.
 - `desktop-file-validate` прошёл; desktop entry, launcher, binary и runtime library находятся в user-local каталоге.
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`, `cargo check --workspace`, `cargo test --workspace` (13 tests, 0 failed), `cargo build --release -p telerust` прошли.
 
 ## Не проверено
 
-- Пользователь ещё не сканировал QR. Авторизация, 2FA/email на аккаунте, восстановление сессии, список чатов, история, получение/отправка сообщений и logout не прошли E2E.
+- 2FA/email на аккаунте не встречались. История, получение/отправка сообщений, восстановление сессии после перезапуска и logout не прошли E2E.
 - GTK credential form на чистом профиле отдельно не тестировалась; в текущей среде уже был готовый закрытый config.
 - QR-код доступен в UI, но скриншот не снимался. Доказательство отрисовки: TDLib выдала ссылку, UI перешёл на QR состояние, соответствующие label доступны через AT-SPI.
 - Клавиатурная навигация/доступность, live reconnect и performance после входа не измерялись.
 
 ## Следующее действие пользователя
 
-В оставленном открытым окне Telerust отсканируйте QR через Telegram → Settings → Devices → Link Desktop Device. Если Telegram потребует подтверждение или приложение покажет 2FA/email prompt, завершите шаг вручную в Telerust. После входа проверьте список и открытие чатов. Сообщения автоматически не отправляются.
+Окно Telerust сейчас достигло `Connected`/`Chats`. Проверьте список, затем самостоятельно откройте нужную переписку. Мы не открывали чаты и не отправляли сообщения. Для проверки после перезапуска можно закрыть и запустить Telerust повторно; logout в этой сессии не выполнялся.
 
 Не присылайте API credentials, телефон, коды или содержимое переписки в чат.

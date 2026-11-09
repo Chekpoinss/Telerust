@@ -45,8 +45,8 @@
 - [x] Сохранять backend diagnostic в UI после закрытия event channel.
 - [x] TDLib discovery в постоянном user-local runtime каталоге и ABI probe при установке.
 - [x] Подключать TDLib через manual GNOME proxy configuration / environment fallback без записи proxy credentials в Telerust config/logs.
-- [x] Получить настоящий production QR и показать QR auth state в приложении.
-- [ ] Пользователь вручную подтверждает QR; затем проверить chats, history, receive/send, восстановление и logout.
+- [x] Получить настоящий production QR, показать QR auth state, затем достичь `Connected`/`Chats`.
+- [ ] Проверить содержимое chats/history, receive/send, восстановление и logout без чтения/логирования приватных сообщений.
 
 ## Первая рабочая версия (MVP)
 
