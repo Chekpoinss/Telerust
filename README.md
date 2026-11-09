@@ -6,7 +6,7 @@
 
 ## Состояние
 
-Окно, локальная конфигурация credentials, QR login через TDLib, телефонный вход, prompts кода/2FA/email, список личных/групповых чатов, последние сообщения, текстовый composer и logout подключены. Production DC выбран по умолчанию; test DC включается явно и хранит данные в отдельной сессии. Запросы/updates идут вне GTK main thread. Каналы скрыты до реализации обязательного отображения sponsored messages. QR rendering и auth state mapping покрыты unit-тестами; живой вход и реальные переписки здесь не проверены.
+Окно, локальная конфигурация credentials, QR login через TDLib, телефонный вход, prompts кода/2FA/email, список личных/групповых чатов, последние сообщения, текстовый composer и logout подключены. Production DC выбран по умолчанию; test DC включается явно и хранит данные в отдельной сессии. Запросы/updates идут вне GTK main thread. Каналы скрыты до реализации обязательного отображения sponsored messages. Настоящий production QR в текущем окружении был получен от TDLib и показан в GTK; пользовательское подтверждение, список чатов и переписки ещё не проверены.
 
 ## Fedora build dependencies
 
@@ -17,7 +17,7 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-Для GNOME меню можно установить release сборку для текущего пользователя: `./scripts/install-user.sh`. Удаление приложения: `./scripts/uninstall-user.sh`. Настройки и Telegram-сессия при удалении сохраняются. Launcher ищет `libtdjson.so` в системном пути динамических библиотек; при отсутствии приложение покажет понятную ошибку.
+Для GNOME меню можно установить release сборку для текущего пользователя: `./scripts/install-user.sh`. При наличии проверенного runtime можно передать его через `TELERUST_TDLIB_SOURCE=/path/to/libtdjson.so ./scripts/install-user.sh`; скрипт запускает ABI probe и копирует library в `$XDG_DATA_HOME/telerust/lib/`. TDLib также ищется по этому пути без `LD_LIBRARY_PATH`, затем в обычных системных местах. Если GNOME настроен на manual proxy, Telerust передаёт эту настройку в TDLib; переменные `HTTPS_PROXY`/`HTTP_PROXY` используются как запасной источник. Удаление приложения: `./scripts/uninstall-user.sh`. Настройки и Telegram-сессия при удалении сохраняются.
 
 Системная runtime TDLib не входит в Cargo сборку. Установите официальный TDLib (`tdjson`) через [сборочный генератор TDLib](https://tdlib.github.io/td/) и задайте путь к `libtdjson.so` в конфигурации ниже. Не используйте непроверенные бинарные сборки для production.
 
@@ -63,7 +63,7 @@ cargo run -p telerust-tdlib-bridge --example probe -- /path/to/libtdjson.so
 - Ghost Mode и изменение read/online/typing состояния не реализуются: это запрещено Telegram API Terms.
 - Каналы пока не отображаются; это предотвращает доступ к канальному контенту до реализации официальных sponsored messages.
 - Показаны последние 50 сообщений; пагинации, виртуализации, медиа, Secret Chats и передачи файлов пока нет.
-- Авторизация и обмен с реальным test DC не проверялись в этом окружении: тестовые credentials/account не предоставлены.
+- QR link от production TDLib и переход UI на экран его показа проверены без сканирования. Авторизация аккаунта, список/история чатов и обмен сообщениями не проверялись.
 - QR payload берётся только из TDLib `authorizationStateWaitOtherDeviceConfirmation.link`; при обновлении TDLib auth state QR перестраивается. Переключение из QR к телефону перезапускает неавторизованный TDLib инстанс через `destroy`.
 - Logout проходит через `logOut`; по контракту TDLib он удаляет локальные TDLib данные после сетевого завершения. Bridge дополнительно удаляет encryption key из Secret Service и запускает чистый auth instance.
 - Окно и библиотека прошли build/probe в локальной Fedora GNOME Wayland среде; `HANDOFF.md` содержит точные пройденные проверки и ограничения.

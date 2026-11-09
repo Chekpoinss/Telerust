@@ -53,6 +53,8 @@ fn build_window(app: &adw::Application) {
     status.set_margin_top(6);
     status.set_margin_bottom(6);
     status.add_css_class("dim-label");
+    status.set_wrap(true);
+    status.set_max_width_chars(120);
     content.append(&status);
 
     let stack = gtk::Stack::builder()
@@ -461,6 +463,7 @@ fn wire_messages(ui: &Ui) {
 fn attach_events(ui: &Ui, events: async_channel::Receiver<BackendEvent>) {
     let ui = ui.clone();
     gtk::glib::MainContext::default().spawn_local(async move {
+        let mut backend_error_shown = false;
         while let Ok(event) = events.recv().await {
             match event {
                 BackendEvent::Authorization(AuthorizationState::Ready) => {
@@ -482,7 +485,19 @@ fn attach_events(ui: &Ui, events: async_channel::Receiver<BackendEvent>) {
                         ui.status
                             .set_text("Scan this QR code with Telegram on your phone.");
                     }
-                    _ => ui.status.set_text("Connecting to Telegram…"),
+                    AuthorizationState::WaitingForParameters => {
+                        ui.status.set_text("Initializing the secure TDLib session…");
+                    }
+                    AuthorizationState::WaitingForPhoneNumber => {
+                        ui.status.set_text("Preparing Telegram sign-in…");
+                    }
+                    AuthorizationState::WaitingForCode => {
+                        ui.status.set_text("Waiting for the Telegram login code…");
+                    }
+                    AuthorizationState::WaitingForPassword => {
+                        ui.status.set_text("Telegram requires your two-step verification password.");
+                    }
+                    AuthorizationState::Ready => ui.status.set_text("Connected to Telegram."),
                 },
                 BackendEvent::QrLink(link) => match render_qr(&ui.qr_area, &link) {
                     Ok(()) => {
@@ -517,16 +532,27 @@ fn attach_events(ui: &Ui, events: async_channel::Receiver<BackendEvent>) {
                     }
                 }
                 BackendEvent::Status(text) => ui.status.set_text(&text),
-                BackendEvent::Error(text) => ui.status.set_text(&text),
+                BackendEvent::Error(text) => {
+                    backend_error_shown = true;
+                    ui.status.set_text(&text);
+                }
             }
         }
-        ui.status.set_text("Backend stopped.");
+        if !backend_error_shown {
+            ui.status.set_text(
+                "TDLib stopped unexpectedly. Check the library and Secret Service, then restart Telerust.",
+            );
+        }
     });
 }
 
 fn set_prompt(ui: &Ui, prompt: AuthPrompt) {
     let (text, placeholder, password) = match prompt {
-        AuthPrompt::PhoneNumber => ("Enter the test account phone number", "Phone number", false),
+        AuthPrompt::PhoneNumber => (
+            "Enter your phone number with country code",
+            "+1 555 010 1234",
+            false,
+        ),
         AuthPrompt::Code => ("Enter the login code", "Login code", false),
         AuthPrompt::Password => (
             "Enter your two-step verification password",

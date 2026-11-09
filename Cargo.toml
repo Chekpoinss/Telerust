@@ -15,6 +15,7 @@ async-channel = "2.5"
 gtk = { package = "gtk4", version = "=0.10.1", features = ["gnome_45"] }
 adw = { package = "libadwaita", version = "=0.8.0", features = ["v1_5"] }
 getrandom = "0.3"
+gio = "=0.21.5"
 keyring = { version = "=3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 libloading = "0.8"
 serde = { version = "1", features = ["derive"] }

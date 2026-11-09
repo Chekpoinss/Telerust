@@ -135,6 +135,7 @@ fn run(settings: Settings, commands: Receiver<BackendCommand>, events: Sender<Ba
 #[derive(Debug)]
 enum BackendError {
     MissingLibrary,
+    UnloadableLibrary,
     MissingSymbol,
     Keyring,
     Storage,
@@ -143,10 +144,11 @@ enum BackendError {
 impl BackendError {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::MissingLibrary => "TDLib is not installed. Install libtdjson and restart.",
-            Self::MissingSymbol => {
-                "The TDLib library does not provide the required JSON C interface."
+            Self::MissingLibrary => "TDLib runtime is missing. Install a compatible libtdjson.so, or place it under the Telerust data directory's lib/ folder, then restart.",
+            Self::UnloadableLibrary => {
+                "TDLib was found but could not be loaded. Check the library architecture and dynamic dependencies."
             }
+            Self::MissingSymbol => "TDLib loaded, but its JSON C ABI is incomplete or incompatible. Install a matching official TDLib build.",
             Self::Keyring => "GNOME Keyring is unavailable or locked; unlock it and restart.",
             Self::Storage => "The private session directory could not be prepared.",
         }
@@ -178,8 +180,14 @@ fn run_inner(
         std::fs::set_permissions(&files_dir, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| BackendError::Storage)?;
     }
-    let key = get_database_key(settings.api_id, environment)?;
     let mut client = TdClient::load(settings.tdlib_library.as_deref())?;
+    let key = get_database_key(settings.api_id, environment)?;
+    if let Some(proxy) = gnome_proxy_request() {
+        client.send(&proxy);
+        let _ = events.send_blocking(BackendEvent::Status(
+            "Connecting to Telegram through the GNOME system proxy…".into(),
+        ));
+    }
     client.send(&json!({"@type":"getAuthorizationState"}));
 
     let mut chats: HashMap<i64, ChatSummary> = HashMap::new();
@@ -340,6 +348,16 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
         prefer_qr,
     } = context;
     match update.get("@type").and_then(Value::as_str).unwrap_or("") {
+        "updateConnectionState" => {
+            if let Some(status) = connection_status(
+                update
+                    .pointer("/state/@type")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            ) {
+                let _ = events.send_blocking(BackendEvent::Status(status.into()));
+            }
+        }
         "updateAuthorizationState" => {
             let state = update
                 .pointer("/authorization_state/@type")
@@ -371,6 +389,9 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
             }
             let (mapped, prompt) = match state {
                 "authorizationStateWaitTdlibParameters" => {
+                    let _ = events.send_blocking(BackendEvent::Status(
+                        "Initializing TDLib with the saved application credentials…".into(),
+                    ));
                     client.send(&json!({
                         "@type":"setTdlibParameters", "use_test_dc":settings.use_test_dc,
                         "database_directory":db_dir.to_string_lossy(),
@@ -386,29 +407,46 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
                     (AuthorizationState::WaitingForParameters, None)
                 }
                 "authorizationStateWaitEncryptionKey" => {
+                    let _ = events.send_blocking(BackendEvent::Status(
+                        "Opening the encrypted local Telegram session…".into(),
+                    ));
                     client
                         .send(&json!({"@type":"checkDatabaseEncryptionKey","encryption_key":key}));
                     (AuthorizationState::WaitingForParameters, None)
                 }
                 "authorizationStateWaitPhoneNumber" => {
                     if *prefer_qr {
+                        let _ = events.send_blocking(BackendEvent::Status(
+                            "TDLib is ready. Requesting a live QR code from Telegram…".into(),
+                        ));
                         client.send(
                             &json!({"@type":"requestQrCodeAuthentication","other_user_ids":[]}),
                         );
                         return;
                     }
+                    let _ = events.send_blocking(BackendEvent::Status(
+                        "Enter your phone number with country code.".into(),
+                    ));
                     (
                         AuthorizationState::WaitingForPhoneNumber,
                         Some(AuthPrompt::PhoneNumber),
                     )
                 }
                 "authorizationStateWaitCode" => {
+                    let _ = events.send_blocking(BackendEvent::Status(
+                        "Enter the login code sent by Telegram.".into(),
+                    ));
                     (AuthorizationState::WaitingForCode, Some(AuthPrompt::Code))
                 }
-                "authorizationStateWaitPassword" => (
-                    AuthorizationState::WaitingForPassword,
-                    Some(AuthPrompt::Password),
-                ),
+                "authorizationStateWaitPassword" => {
+                    let _ = events.send_blocking(BackendEvent::Status(
+                        "Enter your Telegram two-step verification password.".into(),
+                    ));
+                    (
+                        AuthorizationState::WaitingForPassword,
+                        Some(AuthPrompt::Password),
+                    )
+                }
                 "authorizationStateWaitEmailAddress" => (
                     AuthorizationState::WaitingForPhoneNumber,
                     Some(AuthPrompt::EmailAddress),
@@ -502,9 +540,9 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
         }
         "error" => {
             let code = update.get("code").and_then(Value::as_i64).unwrap_or(0);
-            let _ = events.send_blocking(BackendEvent::Error(format!(
-                "Telegram request failed (code {code})."
-            )));
+            let error_name = update.get("message").and_then(Value::as_str).unwrap_or("");
+            let _ =
+                events.send_blocking(BackendEvent::Error(tdlib_error_message(code, error_name)));
         }
         "updateMessageSendFailed" => {
             let code = update
@@ -516,6 +554,39 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
             )));
         }
         _ => {}
+    }
+}
+
+fn tdlib_error_message(code: i64, error_name: &str) -> String {
+    let known = match error_name {
+        "API_ID_INVALID" => Some(
+            "Telegram rejected the saved API credentials. Check them in Telerust settings; their values are hidden.",
+        ),
+        "API_ID_PUBLISHED_FLOOD" => Some(
+            "Telegram restricted this API application ID. Use credentials issued for your own application.",
+        ),
+        "PHONE_NUMBER_INVALID" => Some("That phone number was rejected. Check the country code and try again."),
+        "PHONE_CODE_INVALID" => Some("That login code was rejected. Check the latest code and try again."),
+        "PHONE_CODE_EXPIRED" => Some("That login code expired. Request a new code and try again."),
+        "PASSWORD_HASH_INVALID" => Some("That two-step verification password was rejected. Try again."),
+        "FLOOD_WAIT" | "FLOOD_PREMIUM_WAIT" => Some("Telegram is rate limiting sign-in. Wait before trying again."),
+        _ => None,
+    };
+    known.map(str::to_owned).unwrap_or_else(|| {
+        format!("Telegram request failed (code {code}). Check the connection and retry.")
+    })
+}
+
+fn connection_status(state: &str) -> Option<&'static str> {
+    match state {
+        "connectionStateWaitingForNetwork" => Some(
+            "No network is available. Check GNOME network and proxy settings, then wait for reconnect.",
+        ),
+        "connectionStateConnectingToProxy" => Some("Connecting to Telegram through the configured proxy…"),
+        "connectionStateConnecting" => Some("Connecting to Telegram…"),
+        "connectionStateUpdating" => Some("Updating the Telegram connection…"),
+        "connectionStateReady" => Some("Connected to Telegram; waiting for authorization state…"),
+        _ => None,
     }
 }
 
@@ -623,6 +694,154 @@ fn data_path() -> PathBuf {
         .join("telerust")
 }
 
+/// Read GNOME's manual proxy configuration without logging host credentials.
+/// The proxy is passed only to TDLib in memory and is never written to app config.
+fn gnome_proxy_request() -> Option<Value> {
+    use gio::prelude::*;
+
+    if let Some(source) = gio::SettingsSchemaSource::default() {
+        if let Some(root_schema) = source.lookup("org.gnome.system.proxy", true) {
+            let root = gio::Settings::new_full(&root_schema, None::<&gio::SettingsBackend>, None);
+            if root.string("mode").as_str() == "manual" {
+                for (scheme, proxy_type) in [
+                    ("https", "proxyTypeHttp"),
+                    ("http", "proxyTypeHttp"),
+                    ("socks", "proxyTypeSocks5"),
+                ] {
+                    let schema_id = format!("org.gnome.system.proxy.{scheme}");
+                    let Some(schema) = source.lookup(&schema_id, true) else {
+                        continue;
+                    };
+                    let settings =
+                        gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None);
+                    let host = settings.string("host");
+                    let port = settings.int("port");
+                    if host.is_empty() || !(1..=u16::MAX as i32).contains(&port) {
+                        continue;
+                    }
+                    let (username, password) = if schema.has_key("use-authentication")
+                        && settings.boolean("use-authentication")
+                    {
+                        (
+                            settings.string("authentication-user").to_string(),
+                            settings.string("authentication-password").to_string(),
+                        )
+                    } else {
+                        (String::new(), String::new())
+                    };
+                    return Some(proxy_request(
+                        host.as_str(),
+                        port as u16,
+                        proxy_type,
+                        &username,
+                        &password,
+                    ));
+                }
+            }
+        }
+    }
+
+    [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .iter()
+    .filter_map(|key| std::env::var(key).ok())
+    .find_map(|value| proxy_request_from_url(&value))
+}
+
+fn proxy_request(host: &str, port: u16, proxy_type: &str, username: &str, password: &str) -> Value {
+    let kind = if proxy_type == "proxyTypeHttp" {
+        json!({
+            "@type": proxy_type,
+            "username": username,
+            "password": password,
+            "http_only": false
+        })
+    } else {
+        json!({
+            "@type": proxy_type,
+            "username": username,
+            "password": password
+        })
+    };
+    json!({
+        "@type":"addProxy",
+        "enable":true,
+        "proxy":{
+            "@type":"proxy",
+            "server":host,
+            "port":port,
+            "type":kind
+        }
+    })
+}
+
+fn proxy_request_from_url(value: &str) -> Option<Value> {
+    let (scheme, rest) = value.trim().split_once("://")?;
+    let proxy_type = match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => "proxyTypeHttp",
+        "socks5" | "socks5h" => "proxyTypeSocks5",
+        _ => return None,
+    };
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let (userinfo, host_port) = authority
+        .rsplit_once('@')
+        .map_or((None, authority), |(userinfo, host)| (Some(userinfo), host));
+    let (host, port) = if let Some(bracketed) = host_port.strip_prefix('[') {
+        let (host, tail) = bracketed.split_once(']')?;
+        let port = tail.strip_prefix(':')?.parse::<u16>().ok()?;
+        (host, port)
+    } else {
+        let (host, port) = host_port.rsplit_once(':')?;
+        if host.contains(':') {
+            return None;
+        }
+        (host, port.parse::<u16>().ok()?)
+    };
+    if host.is_empty() || port == 0 {
+        return None;
+    }
+    let (username, password) = if let Some(userinfo) = userinfo {
+        let (username, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+        (percent_decode(username)?, percent_decode(password)?)
+    } else {
+        (String::new(), String::new())
+    };
+    Some(proxy_request(host, port, proxy_type, &username, &password))
+}
+
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            decoded.push((hex_value(high)? << 4) | hex_value(low)?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn get_database_key(api_id: i32, environment: &str) -> Result<String, BackendError> {
     let account = format!("tdlib-db-key-{api_id}-{environment}");
     let entry =
@@ -656,21 +875,26 @@ struct TdClient {
 
 impl TdClient {
     fn load(explicit: Option<&Path>) -> Result<Self, BackendError> {
-        let candidates = if let Some(path) = explicit {
-            vec![path.to_owned()]
-        } else {
+        let mut candidates = Vec::new();
+        if let Some(path) = explicit {
+            candidates.push(path.to_owned());
+        }
+        candidates.push(data_path().join("lib/libtdjson.so"));
+        candidates.extend(
             [
                 "libtdjson.so",
                 "libtdjson-x64-glibc.so",
                 "/usr/lib64/libtdjson.so",
                 "/usr/lib64/libtdjson-x64-glibc.so",
+                "/usr/lib/libtdjson.so",
                 "/usr/local/lib/libtdjson.so",
                 "/usr/local/lib64/libtdjson.so",
             ]
             .into_iter()
-            .map(PathBuf::from)
-            .collect()
-        };
+            .map(PathBuf::from),
+        );
+        candidates.dedup();
+        let found_file = candidates.iter().any(|candidate| candidate.is_file());
         let mut loaded = None;
         for candidate in candidates {
             // SAFETY: The library is retained in Self for the entire lifetime of
@@ -680,7 +904,11 @@ impl TdClient {
                 break;
             }
         }
-        let library = loaded.ok_or(BackendError::MissingLibrary)?;
+        let library = loaded.ok_or(if found_file {
+            BackendError::UnloadableLibrary
+        } else {
+            BackendError::MissingLibrary
+        })?;
         // SAFETY: These symbol names and signatures match TDLib's documented
         // modern JSON C interface. Function pointers stay within library lifetime.
         let (create_fn, send_fn, receive_fn, execute_fn) = unsafe {
@@ -819,5 +1047,50 @@ mod tests {
         emit_chats(&chats, &sender);
         let event = receiver.try_recv().unwrap();
         assert!(matches!(event, BackendEvent::Chats(items) if items.is_empty()));
+    }
+
+    #[test]
+    fn invalid_api_credentials_get_actionable_redacted_diagnostic() {
+        let error = tdlib_error_message(400, "API_ID_INVALID");
+        assert!(error.contains("saved API credentials"));
+        assert!(error.contains("values are hidden"));
+    }
+
+    #[test]
+    fn unknown_tdlib_errors_do_not_echo_server_text() {
+        let error = tdlib_error_message(500, "private server detail");
+        assert_eq!(
+            error,
+            "Telegram request failed (code 500). Check the connection and retry."
+        );
+    }
+
+    #[test]
+    fn proxy_url_becomes_tdlib_request_without_exposing_credentials() {
+        let request = proxy_request_from_url("http://demo%40user:p%3Aword@127.0.0.1:1080/")
+            .expect("synthetic proxy URL is valid");
+        assert_eq!(request["@type"], "addProxy");
+        assert_eq!(request["proxy"]["server"], "127.0.0.1");
+        assert_eq!(request["proxy"]["port"], 1080);
+        assert_eq!(request["proxy"]["type"]["username"], "demo@user");
+        assert_eq!(request["proxy"]["type"]["password"], "p:word");
+    }
+
+    #[test]
+    fn proxy_url_parser_rejects_invalid_ports_and_schemes() {
+        assert!(proxy_request_from_url("http://127.0.0.1:0").is_none());
+        assert!(proxy_request_from_url("ftp://127.0.0.1:21").is_none());
+    }
+
+    #[test]
+    fn connection_state_updates_have_actionable_network_status() {
+        assert!(connection_status("connectionStateWaitingForNetwork")
+            .unwrap()
+            .contains("GNOME network and proxy"));
+        assert_eq!(
+            connection_status("connectionStateReady"),
+            Some("Connected to Telegram; waiting for authorization state…")
+        );
+        assert_eq!(connection_status("unknownConnectionState"), None);
     }
 }

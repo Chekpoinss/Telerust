@@ -66,6 +66,10 @@ Workspace использует GPL-3.0-or-later. После проверки и�
 - Первый запуск предлагает локальную форму для собственных `api_id`/`api_hash` с my.telegram.org/apps. Значения скрыты в поле ввода, не логируются и сохраняются однократно в закрытый файл; после сохранения требуется перезапуск.
 - API credentials хранятся в файле с режимом `0600`; Secret Service используется для ключа базы TDLib.
 - Установка для текущего пользователя размещает release executable, launcher, `.desktop` и SVG icon под `$XDG_DATA_HOME`; uninstall удаляет только файлы приложения, сохраняя настройки и сессию.
+- TDLib discovery сначала проверяет config path и `$XDG_DATA_HOME/telerust/lib/libtdjson.so`, затем стандартные system paths. В manual proxy mode TDLib получает proxy из GNOME GSettings; environment proxy используется как fallback. Proxy credentials применяются только в памяти и не записываются в config/logs.
+- Backend startup errors сохраняются в UI после закрытия event channel. Известные invalid API ID ошибки преобразуются в redacted diagnostic; неизвестный текст сервера не отображается и не журналируется.
+- TDLib discovery сначала проверяет заданный config путь и `$XDG_DATA_HOME/telerust/lib/libtdjson.so`, затем стандартные системные имена. При manual proxy mode TDLib получает proxy из GSettings; если он выключен/не задан — читается proxy URL из стандартных environment variables. Пароль прокси используется только в памяти при вызове TDLib и не записывается в Telerust config/logs.
+- Backend startup errors сохраняются в UI после закрытия event channel. Ошибки invalid API ID имеют отдельное безопасное сообщение; неизвестный текст сервера не отображается и не журналируется.
 
 ## Текущий разрыв между ADR и прототипом
 

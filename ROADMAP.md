@@ -40,6 +40,14 @@
 - [ ] Получить свежие ресурсные измерения по сценариям из `BENCHMARKS.md`.
 - [ ] Проверить установленный пакет из GNOME меню и TDLib runtime на чистой Fedora 45.
 
+## TDLib backend/connectivity repair (2026-11-10)
+
+- [x] Сохранять backend diagnostic в UI после закрытия event channel.
+- [x] TDLib discovery в постоянном user-local runtime каталоге и ABI probe при установке.
+- [x] Подключать TDLib через manual GNOME proxy configuration / environment fallback без записи proxy credentials в Telerust config/logs.
+- [x] Получить настоящий production QR и показать QR auth state в приложении.
+- [ ] Пользователь вручную подтверждает QR; затем проверить chats, history, receive/send, восстановление и logout.
+
 ## Первая рабочая версия (MVP)
 
 Цель: development build для Fedora 45 GNOME Wayland. Прототип содержит QR/phone auth prompts TDLib, список приватных/групповых чатов, 50 последних сообщений, явную отправку текста и logout. QR-код проверен на синтетическом fixture, но живой E2E не выполнен. До MVP нужны test-DC E2E, виртуализованная история, полноценная обработка сетевых/auth ошибок, каналы и sponsored messages и нагрузочные замеры.

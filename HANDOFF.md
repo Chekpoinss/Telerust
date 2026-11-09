@@ -2,39 +2,35 @@
 
 Дата: 2026-11-10
 
-## Реализовано в текущей версии
+## Реализовано
 
-- GTK4/libadwaita окно, QR/phone auth prompts, включая code, 2FA и email; обновление QR по TDLib auth updates.
-- Локальная форма первичной настройки собственных Telegram `api_id`/`api_hash` с my.telegram.org/apps. Файл config имеет права `0600`, каталог `0700`; значения не выводятся в логи.
-- Production DC по умолчанию; явный test DC использует раздельные TDLib каталоги и Secret Service database keys.
-- TDLib JSON ABI загружается динамически; поиск `libtdjson.so` по стандартным именам/путям. QR/phone переключение, logout, chat list, последние 50 сообщений и явная отправка текста реализованы на уровне кода.
-- User-local release installer, launcher, GNOME `.desktop` entry и SVG icon; installer/uninstaller сохраняют config и сессию при удалении.
-- Проект GPL-3.0-or-later, dependency/native notices — `THIRD_PARTY_NOTICES.md`.
+- GTK4/libadwaita окно и QR/phone auth prompts с code, 2FA и email состояниями.
+- Собственные Telegram API credentials хранятся локально с `0600` config и `0700` каталогом; UI и логи не раскрывают значения.
+- Production DC по умолчанию, отдельные test/prod TDLib базы и Secret Service keys.
+- TDLib JSON ABI динамически загружается; библиотека ищется по config path, `$XDG_DATA_HOME/telerust/lib/libtdjson.so`, затем стандартным system paths.
+- GNOME manual proxy settings передаются в TDLib; environment proxy — fallback. Proxy credentials не сохраняются в Telerust config и не пишутся в логи.
+- Backend error больше не перетирается сообщением `Backend stopped.`; неверный API ID и основные auth ошибки получают безопасные понятные диагностики.
+- User-local release installer/launcher, GNOME desktop entry, icon. Uninstaller сохраняет config и TDLib session databases.
 
 ## Проверено
 
-- До текущих изменений Git `main` был чистым и совпадал с `origin/main` на `c310fd9604f7c29cc8eec5c16cd198163d77192d`.
-- GitHub Actions CI run `42712846293` для того commit завершился success.
-- В текущей итерации прошли `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`, `cargo check --workspace`, `cargo test --workspace` (8 unit tests, 0 failed), `cargo build --release -p telerust`.
-- TDLib smoke probe прошёл: `/tmp/telerust-tdlib/libtdjson.so` загрузилась и ответила на начальное состояние без авторизации/сети.
-- Fedora 45 Wayland: release executable и затем установленный launcher открыты 8 секунд с изолированными пустыми XDG config/data путями; оба завершены `timeout` (ожидаемый код 124), окна не закрылись сами и в stderr не было ошибок. Это подтверждает запуск процесса/GUI, не визуальную отрисовку/сканирование QR.
-- User-local install выполнен. `desktop-file-validate ~/.local/share/applications/org.telerust.Client.desktop` прошёл; desktop entry, launcher, binary и SVG icon установлены.
-- Один UI-only idle прогон (`scripts/measure-gui-idle.sh 10`, изолированные пустые XDG dirs): RSS/HWM 174328 KiB, PSS 86828 KiB, USS 47816 KiB, CPU 0.100%. Подробности и ограничения в `BENCHMARKS.md`.
-- `git diff --check` прошёл; быстрый поиск credentials/телефонов/QR tokens в изменённых файлах нашёл только synthetic test fixtures.
+- `$XDG_CONFIG_HOME/telerust/config.toml` parse/permissions прошли проверку без вывода содержимого: каталог `0700`, файл `0600`, production (`use_test_dc=false`), credentials структурно валидны.
+- Старая первопричина: config не задавал `tdlib_library`, поиск не включал user-local каталог, а GTK затирал backend error после закрытия event channel.
+- TDLib из ранее собранного `/tmp/telerust-tdlib/libtdjson.so`: версия `1.8.67`, ELF x86_64; `ldd -r` без неразрешённых зависимостей/символов; ABI probe прошёл. Та же библиотека скопирована и повторно проверена в `$XDG_DATA_HOME/telerust/lib/libtdjson.so`; `/tmp` больше не нужен для запуска.
+- Прямое подключение к Telegram endpoint в этой сети не проходило. После использования настроенного GNOME proxy TDLib установила соединение с production DC и получила настоящий `authorizationStateWaitOtherDeviceConfirmation.link`.
+- Обновлённая release app запущена через установленный launcher. Доступное GTK UI показывает `Scan to sign in` и `Scan this QR code…`; link не выводился и не сохранялся отдельно. Окно оставлено открытым для ручного сканирования.
+- `desktop-file-validate` прошёл; desktop entry, launcher, binary и runtime library находятся в user-local каталоге.
+- `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`, `cargo check --workspace`, `cargo test --workspace` (13 tests, 0 failed), `cargo build --release -p telerust` прошли.
 
 ## Не проверено
 
-- Нет предоставленных собственных API credentials или отдельного test-DC аккаунта. Вход, реальный QR, телефонный код, 2FA/email, списки реальных чатов, история, обмен сообщениями, восстановление и logout не прошли E2E. Не имитировать успешный вход.
-- Настройка через GTK форму и права файла на чистом профиле в отдельном GUI-сеансе не проходили.
-- GNOME shell обновление меню/иконки и визуальная отрисовка auth screen не проверены скриншотом; `.desktop` файл валиден, установленный launcher запускается.
-- Актуальные RSS/PSS/USS/CPU/startup benchmarks отсутствуют. Сравнения с AyuGram нет.
-- Выбор страны, повторная отправка кода, расширенные retry/error transitions, виртуализация истории и каналы/sponsored messages не реализованы.
+- Пользователь ещё не сканировал QR. Авторизация, 2FA/email на аккаунте, восстановление сессии, список чатов, история, получение/отправка сообщений и logout не прошли E2E.
+- GTK credential form на чистом профиле отдельно не тестировалась; в текущей среде уже был готовый закрытый config.
+- QR-код доступен в UI, но скриншот не снимался. Доказательство отрисовки: TDLib выдала ссылку, UI перешёл на QR состояние, соответствующие label доступны через AT-SPI.
+- Клавиатурная навигация/доступность, live reconnect и performance после входа не измерялись.
 
-## Действия пользователя для реального входа
+## Следующее действие пользователя
 
-1. Получить собственные `api_id` и `api_hash` на https://my.telegram.org/apps.
-2. Установить TDLib `libtdjson.so`, если она ещё не установлена.
-3. Установить приложение командой `./scripts/install-user.sh`, запустить Telerust из меню приложений и заполнить форму credentials. Для production оставить Test DC выключенным.
-4. Перезапустить приложение. Для E2E теста отправки сообщений необходим отдельный тестовый аккаунт и явно разрешённый тестовый чат; не используйте личную сессию для проверки отправки.
+В оставленном открытым окне Telerust отсканируйте QR через Telegram → Settings → Devices → Link Desktop Device. Если Telegram потребует подтверждение или приложение покажет 2FA/email prompt, завершите шаг вручную в Telerust. После входа проверьте список и открытие чатов. Сообщения автоматически не отправляются.
 
-Никогда не отправлять API credentials, телефон, сессионные файлы или сообщения в чат/репозиторий.
+Не присылайте API credentials, телефон, коды или содержимое переписки в чат.

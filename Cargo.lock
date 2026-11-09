@@ -1427,6 +1427,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "getrandom 0.3.4",
+ "gio",
  "keyring",
  "libloading",
  "serde_json",
