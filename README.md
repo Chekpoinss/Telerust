@@ -6,7 +6,7 @@
 
 ## Состояние
 
-Окно, локальная конфигурация, QR login через TDLib, телефонный вход, prompts кода/2FA/email, список личных/групповых чатов, последние сообщения, текстовый composer и logout подключены. Запросы/updates идут вне GTK main thread. Каналы скрыты до реализации обязательного отображения sponsored messages. QR rendering и auth state mapping покрыты изолированными unit-тестами; живой тестовый login в этой среде не выполнялся.
+Окно, локальная конфигурация credentials, QR login через TDLib, телефонный вход, prompts кода/2FA/email, список личных/групповых чатов, последние сообщения, текстовый composer и logout подключены. Production DC выбран по умолчанию; test DC включается явно и хранит данные в отдельной сессии. Запросы/updates идут вне GTK main thread. Каналы скрыты до реализации обязательного отображения sponsored messages. QR rendering и auth state mapping покрыты unit-тестами; живой вход и реальные переписки здесь не проверены.
 
 ## Fedora build dependencies
 
@@ -17,11 +17,15 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+Для GNOME меню можно установить release сборку для текущего пользователя: `./scripts/install-user.sh`. Удаление приложения: `./scripts/uninstall-user.sh`. Настройки и Telegram-сессия при удалении сохраняются. Launcher ищет `libtdjson.so` в системном пути динамических библиотек; при отсутствии приложение покажет понятную ошибку.
+
 Системная runtime TDLib не входит в Cargo сборку. Установите официальный TDLib (`tdjson`) через [сборочный генератор TDLib](https://tdlib.github.io/td/) и задайте путь к `libtdjson.so` в конфигурации ниже. Не используйте непроверенные бинарные сборки для production.
 
 ## Локальная конфигурация и вход
 
-Получите собственные `api_id`/`api_hash` в [Telegram API development tools](https://my.telegram.org/apps). Создайте файл вне репозитория:
+Получите собственные `api_id`/`api_hash` в [Telegram API development tools](https://my.telegram.org/apps): войдите на my.telegram.org, откройте API development tools, создайте приложение и возьмите выданные значения. При первом запуске нажмите **Set up Telegram API credentials**, введите значения и сохраните. Они записываются в `$XDG_CONFIG_HOME/telerust/config.toml` (обычно `~/.config/telerust/config.toml`) с правами `0600`. Перезапустите приложение, чтобы начать подключение. Не отправляйте credentials в чат и не добавляйте файл в Git.
+
+Файл можно создать вручную:
 
 ```sh
 install -d -m 700 "${XDG_CONFIG_HOME:-$HOME/.config}/telerust"
@@ -34,15 +38,17 @@ chmod 600 "${XDG_CONFIG_HOME:-$HOME/.config}/telerust/config.toml"
 ```toml
 api_id = 123456
 api_hash = "replace-with-your-32-character-api-hash"
-use_test_dc = true
+# Необязательно; по умолчанию false (production DC)
+use_test_dc = false
+# Необязательно, если libtdjson.so находится в системном пути
 tdlib_library = "/usr/local/lib/libtdjson.so"
 ```
 
-`use_test_dc` по умолчанию `true`; для первого теста используйте отдельный test-DC аккаунт. Условия Telegram предупреждают не хранить важную/личную переписку в тестовой среде. Не выключайте test DC для тестовой учётной записи. При переключении на production используется отдельный локальный каталог TDLib.
+Production DC используется по умолчанию. Test DC включается явно и предназначен только для отдельного тестового аккаунта; его нельзя смешивать с обычной сессией. Для тестовой среды создаётся отдельная локальная база. Не используйте там важную/личную переписку.
 
 На первом входе приложение по очереди попросит номер, код, пароль 2FA или email-код согласно состоянию TDLib. UI не логирует ввод. Пользователю нужно самостоятельно инициировать отправку каждого сообщения кнопкой Send; приложение не отправляет сообщения при запуске или выборе чата.
 
-Сессионный encryption key создаётся через системный CSPRNG и сохраняется в GNOME Secret Service. Если Secret Service отсутствует/заблокирован, backend остановится с ошибкой. TDLib хранит базу в `$XDG_DATA_HOME/telerust/tdlib-test` с правами `0700`.
+Сессионный encryption key создаётся через системный CSPRNG и сохраняется в GNOME Secret Service. Если Secret Service отсутствует/заблокирован, backend остановится с ошибкой. TDLib хранит базу с правами `0700` в `$XDG_DATA_HOME/telerust/tdlib-prod` или `tdlib-test` соответственно.
 
 ## Проверка TDLib без аккаунта
 

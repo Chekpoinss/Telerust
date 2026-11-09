@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Telerust
+GenericName=Messaging Client
+Comment=Unofficial Telegram client
+Exec=telerust
+Icon=org.telerust.Client
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+StartupWMClass=org.telerust.Client

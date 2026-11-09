@@ -1,20 +1,16 @@
 //! Local, owner-only API configuration. Never include parsed values in errors.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     pub api_id: i32,
     pub api_hash: String,
-    #[serde(default = "default_test_dc")]
+    #[serde(default)]
     pub use_test_dc: bool,
     #[serde(default)]
     pub tdlib_library: Option<PathBuf>,
-}
-
-fn default_test_dc() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +43,42 @@ impl Settings {
         self.api_id > 0
             && self.api_hash.len() == 32
             && self.api_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    /// Write only application credentials and settings, never session data.
+    pub fn save(&self) -> Result<(), SettingsError> {
+        if !self.is_valid() {
+            return Err(SettingsError::Invalid);
+        }
+        let directory = config_path();
+        fs::create_dir_all(&directory).map_err(|_| SettingsError::Invalid)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+                .map_err(|_| SettingsError::Invalid)?;
+        }
+        let path = directory.join("config.toml");
+        let contents = toml::to_string(self).map_err(|_| SettingsError::Invalid)?;
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|_| SettingsError::Invalid)?;
+            file.write_all(contents.as_bytes())
+                .map_err(|_| SettingsError::Invalid)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .map_err(|_| SettingsError::Invalid)?;
+        }
+        #[cfg(not(unix))]
+        fs::write(path, contents).map_err(|_| SettingsError::Invalid)?;
+        Ok(())
     }
 }
 

@@ -3,10 +3,7 @@ use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
-use telerust_client_core::{
-    events::AuthorizationState,
-    settings::{config_path, Settings},
-};
+use telerust_client_core::{events::AuthorizationState, settings::Settings};
 use telerust_tdlib_bridge::{AuthPrompt, BackendCommand, BackendEvent, ChatSummary, MessageView};
 
 #[derive(Clone)]
@@ -20,6 +17,7 @@ struct Ui {
     qr_area: gtk::DrawingArea,
     use_phone_button: gtk::Button,
     use_qr_button: gtk::Button,
+    credentials_button: gtk::Button,
     logout_button: gtk::Button,
     current_prompt: Rc<RefCell<AuthPrompt>>,
     chats: gtk::ListBox,
@@ -73,6 +71,7 @@ fn build_window(app: &adw::Application) {
         qr_area,
         use_phone_button,
         use_qr_button,
+        credentials_button,
     ) = login_view();
     stack.add_named(&login_page, Some("login"));
     let main_page = main_view();
@@ -90,6 +89,7 @@ fn build_window(app: &adw::Application) {
         qr_area,
         use_phone_button,
         use_qr_button,
+        credentials_button,
         logout_button: main_page.5,
         current_prompt: Rc::new(RefCell::new(AuthPrompt::PhoneNumber)),
         chats: main_page.1,
@@ -101,6 +101,7 @@ fn build_window(app: &adw::Application) {
     };
 
     wire_auth(&ui);
+    wire_credentials(&ui, &window);
     wire_messages(&ui);
     wire_logout(&ui);
     attach_events(&ui, event_rx);
@@ -122,10 +123,7 @@ fn start_backend() -> (
             let (command_tx, _command_rx) = async_channel::bounded(1);
             let (event_tx, event_rx) = async_channel::bounded(8);
             let message = match error {
-                telerust_client_core::settings::SettingsError::Missing => format!(
-                    "Create {} with api_id and api_hash. Start with use_test_dc = true.",
-                    config_path().join("config.toml").display()
-                ),
+                telerust_client_core::settings::SettingsError::Missing => "Set up your API credentials from https://my.telegram.org/apps using the button below.".to_string(),
                 telerust_client_core::settings::SettingsError::InsecurePermissions =>
                     "Configuration permissions must be 0600; run chmod 600 on config.toml.".to_string(),
                 telerust_client_core::settings::SettingsError::Invalid =>
@@ -146,6 +144,7 @@ fn login_view() -> (
     gtk::DrawingArea,
     gtk::Button,
     gtk::Button,
+    gtk::Button,
 ) {
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     outer.set_halign(gtk::Align::Center);
@@ -159,7 +158,7 @@ fn login_view() -> (
     let title = gtk::Label::new(Some("Unofficial Telerust"));
     title.add_css_class("title-1");
     outer.append(&title);
-    let disclosure = gtk::Label::new(Some("An unofficial client using the Telegram API. Development is configured for Telegram test servers by default."));
+    let disclosure = gtk::Label::new(Some("An unofficial Telegram client. Use your own API credentials from my.telegram.org/apps. Production servers are used by default."));
     disclosure.set_wrap(true);
     disclosure.set_margin_top(8);
     disclosure.set_margin_bottom(20);
@@ -205,9 +204,79 @@ fn login_view() -> (
     let use_qr = gtk::Button::with_label("Use QR code instead");
     use_qr.set_visible(false);
     outer.append(&use_qr);
+    let credentials = gtk::Button::with_label("Set up Telegram API credentials");
+    credentials.set_margin_top(12);
+    outer.append(&credentials);
     (
-        outer, prompt, input, password, button, qr_area, use_phone, use_qr,
+        outer,
+        prompt,
+        input,
+        password,
+        button,
+        qr_area,
+        use_phone,
+        use_qr,
+        credentials,
     )
+}
+
+fn wire_credentials(ui: &Ui, window: &adw::ApplicationWindow) {
+    let button = ui.credentials_button.clone();
+    let ui = ui.clone();
+    let parent = window.clone();
+    button.connect_clicked(move |_| {
+        let dialog = gtk::Window::builder()
+            .title("Telegram API credentials")
+            .transient_for(&parent)
+            .modal(true)
+            .default_width(420)
+            .build();
+        let layout = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        layout.set_margin_top(12);
+        layout.set_margin_bottom(12);
+        layout.set_margin_start(12);
+        layout.set_margin_end(12);
+        let help = gtk::Label::new(Some("Create an application at https://my.telegram.org/apps, then enter its api_id and api_hash here. They are saved locally with owner-only permissions and are never logged."));
+        help.set_wrap(true);
+        layout.append(&help);
+        let api_id = gtk::Entry::new();
+        api_id.set_placeholder_text(Some("api_id"));
+        api_id.set_input_purpose(gtk::InputPurpose::Digits);
+        layout.append(&api_id);
+        let api_hash = gtk::Entry::new();
+        api_hash.set_placeholder_text(Some("api_hash"));
+        api_hash.set_visibility(false);
+        layout.append(&api_hash);
+        let test_dc = gtk::CheckButton::with_label("Use Telegram test DC (requires a separate test account)");
+        layout.append(&test_dc);
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        actions.set_halign(gtk::Align::End);
+        let cancel = gtk::Button::with_label("Cancel");
+        let save = gtk::Button::with_label("Save");
+        save.add_css_class("suggested-action");
+        actions.append(&cancel);
+        actions.append(&save);
+        layout.append(&actions);
+        dialog.set_child(Some(&layout));
+        let dialog_cancel = dialog.clone();
+        cancel.connect_clicked(move |_| dialog_cancel.close());
+        let ui = ui.clone();
+        let dialog_save = dialog.clone();
+        save.connect_clicked(move |_| {
+            let settings = api_id.text().parse::<i32>().ok().map(|api_id| Settings {
+                api_id,
+                api_hash: api_hash.text().to_string(),
+                use_test_dc: test_dc.is_active(),
+                tdlib_library: None,
+            });
+            match settings.and_then(|settings| settings.save().ok()) {
+                Some(()) => ui.status.set_text("Credentials saved. Restart Telerust to connect."),
+                None => ui.status.set_text("Credentials were not saved. Check api_id and api_hash; values are not displayed."),
+            }
+            dialog_save.close();
+        });
+        dialog.present();
+    });
 }
 
 // Return page plus widgets which need event updates.
@@ -413,7 +482,7 @@ fn attach_events(ui: &Ui, events: async_channel::Receiver<BackendEvent>) {
                         ui.status
                             .set_text("Scan this QR code with Telegram on your phone.");
                     }
-                    _ => ui.status.set_text("Connecting to Telegram test servers…"),
+                    _ => ui.status.set_text("Connecting to Telegram…"),
                 },
                 BackendEvent::QrLink(link) => match render_qr(&ui.qr_area, &link) {
                     Ok(()) => {
