@@ -21,6 +21,8 @@ struct Ui {
     logout_button: gtk::Button,
     current_prompt: Rc<RefCell<AuthPrompt>>,
     chats: gtk::ListBox,
+    chat_name: gtk::Label,
+    chat_avatar: gtk::Label,
     messages: gtk::ListBox,
     composer: gtk::Entry,
     send_button: gtk::Button,
@@ -36,6 +38,28 @@ fn main() {
     application.run();
 }
 
+fn install_theme() {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string("\
+        window.telerust-window { background: #17212b; color: #f5f5f5; }\
+        .chat-list { background: #17212b; }\
+        .chat-list row { border-bottom: 1px solid alpha(#8a9aa8, 0.12); padding: 2px; }\
+        .chat-list row:hover { background: #202b36; }\
+        .chat-list row:selected { background: #2b5278; }\
+        .chat-header { background: #17212b; padding: 10px 14px; border-bottom: 1px solid alpha(#8a9aa8, 0.18); }\
+        .avatar-placeholder { min-width: 42px; min-height: 42px; border-radius: 999px; background: #5288c1; color: white; font-size: 24px; }\
+        .message-in { background: #182533; border-radius: 14px 14px 14px 4px; }\
+        .message-out { background: #2b5278; border-radius: 14px 14px 4px 14px; }\
+    ");
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
 fn build_window(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -43,6 +67,7 @@ fn build_window(app: &adw::Application) {
         .default_width(1020)
         .default_height(700)
         .build();
+    window.add_css_class("telerust-window");
 
     let (command_tx, event_rx) = start_backend();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -80,6 +105,7 @@ fn build_window(app: &adw::Application) {
     stack.add_named(&main_page.0, Some("main"));
     stack.set_visible_child_name("login");
     window.set_content(Some(&content));
+    install_theme();
 
     let ui = Ui {
         stack,
@@ -92,12 +118,14 @@ fn build_window(app: &adw::Application) {
         use_phone_button,
         use_qr_button,
         credentials_button,
-        logout_button: main_page.5,
+        logout_button: main_page.8,
         current_prompt: Rc::new(RefCell::new(AuthPrompt::PhoneNumber)),
         chats: main_page.1,
-        messages: main_page.2,
-        composer: main_page.3,
-        send_button: main_page.4,
+        chat_name: main_page.3,
+        chat_avatar: main_page.4,
+        messages: main_page.5,
+        composer: main_page.6,
+        send_button: main_page.7,
         selected_chat: Rc::new(Cell::new(None)),
         command_tx,
     };
@@ -285,6 +313,9 @@ fn wire_credentials(ui: &Ui, window: &adw::ApplicationWindow) {
 fn main_view() -> (
     gtk::Box,
     gtk::ListBox,
+    gtk::SearchEntry,
+    gtk::Label,
+    gtk::Label,
     gtk::ListBox,
     gtk::Entry,
     gtk::Button,
@@ -305,12 +336,29 @@ fn main_view() -> (
     heading.set_xalign(0.0);
     heading.set_hexpand(true);
     let logout = gtk::Button::with_label("Log out");
+    logout.add_css_class("flat");
     heading_row.append(&heading);
     heading_row.append(&logout);
     sidebar.append(&heading_row);
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Search chats"));
+    search.set_margin_start(10);
+    search.set_margin_end(10);
+    search.set_margin_bottom(8);
+    sidebar.append(&search);
     let chats = gtk::ListBox::new();
     chats.set_selection_mode(gtk::SelectionMode::Single);
-    chats.add_css_class("boxed-list");
+    chats.add_css_class("chat-list");
+    let search_filter = search.clone();
+    chats.set_filter_func(move |row| {
+        let query = search_filter.text().to_string().to_lowercase();
+        query.is_empty()
+            || row
+                .child()
+                .is_some_and(|child| child.widget_name().to_lowercase().contains(&query))
+    });
+    let chats_for_search = chats.clone();
+    search.connect_search_changed(move |_| chats_for_search.invalidate_filter());
     let chat_scroll = gtk::ScrolledWindow::builder()
         .child(&chats)
         .vexpand(true)
@@ -321,6 +369,29 @@ fn main_view() -> (
     split.set_shrink_start_child(false);
 
     let conversation = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let chat_header = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    chat_header.add_css_class("chat-header");
+    let avatar = gtk::Label::new(Some("•"));
+    avatar.add_css_class("avatar-placeholder");
+    chat_header.append(&avatar);
+    let identity = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let chat_name = gtk::Label::new(Some("Select a chat"));
+    chat_name.set_xalign(0.0);
+    chat_name.add_css_class("heading");
+    let presence = gtk::Label::new(Some("Telegram"));
+    presence.set_xalign(0.0);
+    presence.add_css_class("dim-label");
+    identity.append(&chat_name);
+    identity.append(&presence);
+    chat_header.append(&identity);
+    chat_header.set_hexpand(true);
+    let find_button = gtk::Button::from_icon_name("system-search-symbolic");
+    find_button.add_css_class("flat");
+    chat_header.append(&find_button);
+    let info_button = gtk::Button::from_icon_name("view-more-symbolic");
+    info_button.add_css_class("flat");
+    chat_header.append(&info_button);
+    conversation.append(&chat_header);
     let messages = gtk::ListBox::new();
     messages.set_selection_mode(gtk::SelectionMode::None);
     messages.set_valign(gtk::Align::End);
@@ -346,7 +417,9 @@ fn main_view() -> (
 
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.append(&split);
-    (page, chats, messages, composer, send, logout)
+    (
+        page, chats, search, chat_name, avatar, messages, composer, send, logout,
+    )
 }
 
 fn wire_logout(ui: &Ui) {
@@ -447,9 +520,22 @@ fn wire_messages(ui: &Ui) {
     let tx = ui.command_tx.clone();
     let selected = ui.selected_chat.clone();
     let messages = ui.messages.clone();
+    let chat_name = ui.chat_name.clone();
+    let chat_avatar = ui.chat_avatar.clone();
     ui.chats.connect_row_activated(move |_, row| {
         if let Ok(chat_id) = row.widget_name().parse::<i64>() {
             selected.set(Some(chat_id));
+            if let Some(title) = row.tooltip_text() {
+                chat_name.set_text(&title);
+                chat_avatar.set_text(
+                    &title
+                        .chars()
+                        .next()
+                        .unwrap_or('•')
+                        .to_uppercase()
+                        .to_string(),
+                );
+            }
             clear_list(&messages);
             append_info(&messages, "Loading recent messages…");
             if tx.try_send(BackendCommand::OpenChat(chat_id)).is_err() {
@@ -596,6 +682,7 @@ fn render_chats(
     for chat in chats {
         let row = gtk::ListBoxRow::new();
         row.set_widget_name(chat.id.to_string().as_str());
+        row.set_tooltip_text(Some(&chat.title));
         let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
         box_.set_margin_start(12);
         box_.set_margin_end(12);
@@ -605,12 +692,28 @@ fn render_chats(
         title.set_xalign(0.0);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         title.add_css_class("heading");
+        let initials = chat
+            .title
+            .chars()
+            .next()
+            .unwrap_or('•')
+            .to_uppercase()
+            .to_string();
+        let avatar = gtk::Label::new(Some(&initials));
+        avatar.add_css_class("avatar-placeholder");
+        let text_column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        text_column.set_hexpand(true);
         let preview = gtk::Label::new(Some(&chat.preview));
         preview.set_xalign(0.0);
         preview.set_ellipsize(gtk::pango::EllipsizeMode::End);
         preview.add_css_class("dim-label");
-        box_.append(&title);
-        box_.append(&preview);
+        text_column.append(&title);
+        text_column.append(&preview);
+        box_.set_orientation(gtk::Orientation::Horizontal);
+        box_.set_spacing(10);
+        box_.append(&avatar);
+        box_.append(&text_column);
+        box_.set_widget_name(&format!("{} {}", chat.title, chat.preview));
         row.set_child(Some(&box_));
         list.append(&row);
         if selected_id == Some(chat.id) {
@@ -650,9 +753,9 @@ fn append_message(list: &gtk::ListBox, message: &MessageView) {
     bubble.set_margin_top(7);
     bubble.set_margin_bottom(7);
     bubble.add_css_class(if message.outgoing {
-        "card"
+        "message-out"
     } else {
-        "boxed-list"
+        "message-in"
     });
     line.append(&bubble);
     row.set_child(Some(&line));

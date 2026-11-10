@@ -11,6 +11,8 @@
 - GNOME manual proxy settings передаются в TDLib; environment proxy — fallback. Proxy credentials не сохраняются в Telerust config и не пишутся в логи.
 - Backend error больше не перетирается сообщением `Backend stopped.`; неверный API ID и основные auth ошибки получают безопасные понятные диагностики.
 - User-local release installer/launcher, GNOME desktop entry, icon. Uninstaller сохраняет config и TDLib session databases.
+- UI имеет фильтр по уже загруженным чатам, header выбранного чата, initials-placeholder аватар и стилизованные incoming/outgoing bubbles. История пока остаётся одностраничной.
+- При открытии строки header обновляет название и placeholder аватар; CSS provider использует актуальный GTK API.
 
 ## Проверено
 
@@ -21,6 +23,7 @@
 - Обновлённая release app запущена через установленный launcher. Доступное GTK UI показало `Scan to sign in` и `Scan this QR code…`; link не выводился и не сохранялся отдельно. Позже окно перешло в `Connected` и `Chats`, что подтверждает authorization-ready state и открытие списка. Названия чатов/сообщения не читались, сообщения не отправлялись.
 - `desktop-file-validate` прошёл; desktop entry, launcher, binary и runtime library находятся в user-local каталоге.
 - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`, `cargo check --workspace`, `cargo test --workspace` (13 tests, 0 failed), `cargo build --release -p telerust` прошли.
+- Для текущего UI состояния выполнены `cargo fmt --all`, `cargo clippy --workspace --all-targets`, `cargo check --workspace`, `cargo test --workspace` (13 tests, 0 failed), `cargo build --release -p telerust`; все завершились успешно без предупреждений.
 
 ## Не проверено
 
@@ -28,9 +31,16 @@
 - GTK credential form на чистом профиле отдельно не тестировалась; в текущей среде уже был готовый закрытый config.
 - QR-код доступен в UI, но скриншот не снимался. Доказательство отрисовки: TDLib выдала ссылку, UI перешёл на QR состояние, соответствующие label доступны через AT-SPI.
 - Клавиатурная навигация/доступность, live reconnect и performance после входа не измерялись.
+- Новые header/search стили не прошли отдельную визуальную проверку на Wayland/HiDPI; фильтр работает только по загруженным чатам, серверного поиска нет.
 
 ## Следующее действие пользователя
 
 Окно Telerust сейчас достигло `Connected`/`Chats`. Проверьте список, затем самостоятельно откройте нужную переписку. Мы не открывали чаты и не отправляли сообщения. Для проверки после перезапуска можно закрыть и запустить Telerust повторно; logout в этой сессии не выполнялся.
 
 Не присылайте API credentials, телефон, коды или содержимое переписки в чат.
+
+## Следующий приоритет разработки
+
+1. Разнести GUI из `apps/telerust/src/main.rs` по модулям, не меняя backend-контракты.
+2. Сделать безопасную пагинацию истории и проверить её с синтетическими/тестовыми данными; live E2E требует отдельного тестового аккаунта.
+3. Провести визуальную проверку UI и оценить очереди событий под нагрузкой.
