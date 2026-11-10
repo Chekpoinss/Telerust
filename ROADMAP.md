@@ -53,11 +53,15 @@
 - [x] Добавить фильтр списка чатов по загруженным названиям и preview.
 - [x] Добавить шапку открытого чата с названием и initials-placeholder аватаром.
 - [x] Убрать deprecated GTK CSS API и предупреждение о неиспользуемом поле.
-- [ ] Разделить UI на модули и вынести presentation из `main.rs`; критерий: структура виджетов, обработчики и рендереры размещены в отдельных модулях, workspace проверки проходят.
+- [x] Разнести composition/lifecycle, chat list, header, composer, theme и message rows по UI/application/service модулям; критерий: `main.rs` только подключает модули и вызывает run.
+- [x] Добавить bounded message model, bidirectional TDLib page requests с `@extra` correlation, stale-response filtering, dedupe/sort, update/edit/delete, outgoing delivery state и request error events.
+- [x] Заменить message `GtkListBox` на `GtkListView` с `SignalListItemFactory`, date dividers, time/status, grouping, copyable wrapped text и scroll anchoring.
+- [x] Добавить unit tests state/pagination/dedup/order/chat switch/window cap и synthetic UI benchmark for 100/1k/10k requests.
 - [ ] Проверить визуально на GNOME Wayland: светлая/тёмная тема, узкая ширина, клавиатурный фокус и HiDPI.
-- [ ] Реализовать историю с подгрузкой старых сообщений; критерий: навигация назад получает следующую страницу TDLib без блокировки GTK и без потери текущего scroll position.
+- [ ] Проверить live history paging, scroll anchoring, send/edit/delete и network retry через отдельный тестовый аккаунт.
+- [ ] Перенести «к окну» предел 1 000 сообщений в настройку только после измерений; текущая граница фиксирована, при перемещении окна history cursor позволяет загрузить отброшенную сторону.
 - [ ] Исправить известное ограничение очереди backend: проверить bounded-channel backpressure при интенсивном потоке обновлений и обеспечить отзывчивую остановку.
 
 ## Первая рабочая версия (MVP)
 
-Цель: development build для Fedora 45 GNOME Wayland. Прототип содержит QR/phone auth prompts TDLib, список приватных/групповых чатов, 50 последних сообщений, явную отправку текста и logout. QR-код проверен на синтетическом fixture, но живой E2E не выполнен. До MVP нужны test-DC E2E, виртуализованная история, полноценная обработка сетевых/auth ошибок, каналы и sponsored messages и нагрузочные замеры.
+Цель: development build для Fedora 45 GNOME Wayland. Клиент загружает 50-сообщенные страницы с навигацией в обе стороны и удерживает окно максимум 1 000 сообщений в модели; live history E2E и визуальный screenshot review ещё не выполнены. До MVP нужны test-DC E2E, полноценные сетевые retry/error states, каналы и sponsored messages и повторные performance profiles.

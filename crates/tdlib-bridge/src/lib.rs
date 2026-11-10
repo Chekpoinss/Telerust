@@ -12,7 +12,11 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use telerust_client_core::{events::AuthorizationState, settings::Settings};
+use telerust_client_core::{
+    events::AuthorizationState,
+    history::{PageDirection, PAGE_SIZE},
+    settings::Settings,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatSummary {
@@ -26,8 +30,19 @@ pub struct ChatSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageView {
     pub id: i64,
+    pub date: i64,
+    pub sender_id: String,
     pub text: String,
     pub outgoing: bool,
+    pub delivery: DeliveryState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryState {
+    Received,
+    Sending,
+    Sent,
+    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,11 +64,33 @@ pub enum BackendEvent {
     Chats(Vec<ChatSummary>),
     History {
         chat_id: i64,
+        request_id: u64,
         messages: Vec<MessageView>,
+        has_older: bool,
+        has_newer: bool,
+        direction: PageDirection,
+    },
+    HistoryError {
+        chat_id: i64,
+        request_id: u64,
+        message: String,
     },
     NewMessage {
         chat_id: i64,
         message: MessageView,
+    },
+    MessageEdited {
+        chat_id: i64,
+        message: MessageView,
+    },
+    MessageDeleted {
+        chat_id: i64,
+        message_id: i64,
+    },
+    MessageDelivery {
+        chat_id: i64,
+        message_id: i64,
+        delivery: DeliveryState,
     },
     Status(String),
     Error(String),
@@ -69,8 +106,24 @@ pub enum BackendCommand {
     Password(String),
     EmailAddress(String),
     EmailCode(String),
-    OpenChat(i64),
-    SendText { chat_id: i64, text: String },
+    OpenChat {
+        chat_id: i64,
+        request_id: u64,
+    },
+    LoadOlder {
+        chat_id: i64,
+        request_id: u64,
+        from_message_id: i64,
+    },
+    LoadNewer {
+        chat_id: i64,
+        request_id: u64,
+        from_message_id: i64,
+    },
+    SendText {
+        chat_id: i64,
+        text: String,
+    },
     Shutdown,
 }
 
@@ -192,6 +245,7 @@ fn run_inner(
 
     let mut chats: HashMap<i64, ChatSummary> = HashMap::new();
     let mut selected_chat = None;
+    let mut pending_history: HashMap<u64, (i64, i64, PageDirection)> = HashMap::new();
     let mut closed = false;
     let mut restart = false;
     while !closed {
@@ -205,6 +259,7 @@ fn run_inner(
                     key: &key,
                     chats: &mut chats,
                     selected_chat: &mut selected_chat,
+                    pending_history: &mut pending_history,
                     events,
                     closed: &mut closed,
                     prefer_qr,
@@ -248,7 +303,10 @@ fn run_inner(
                 BackendCommand::EmailCode(code) => {
                     client.send(&json!({"@type":"checkAuthenticationEmailCode","code":{"@type":"emailAddressAuthenticationCode","code":code}}));
                 }
-                BackendCommand::OpenChat(chat_id) => {
+                BackendCommand::OpenChat {
+                    chat_id,
+                    request_id,
+                } => {
                     if chats.get(&chat_id).is_some_and(|chat| chat.is_channel) {
                         let _ = events.send_blocking(BackendEvent::Error(
                             "Channel chats are disabled until sponsored message support is implemented.".into(),
@@ -256,10 +314,46 @@ fn run_inner(
                         continue;
                     }
                     selected_chat = Some(chat_id);
-                    client.send(&json!({
-                        "@type":"getChatHistory", "chat_id":chat_id,
-                        "from_message_id":0, "offset":0, "limit":50, "only_local":false
-                    }));
+                    pending_history.clear();
+                    pending_history.insert(request_id, (chat_id, 0, PageDirection::Initial));
+                    client.send(&history_query(
+                        chat_id,
+                        0,
+                        request_id,
+                        PageDirection::Initial,
+                    ));
+                }
+                BackendCommand::LoadOlder {
+                    chat_id,
+                    request_id,
+                    from_message_id,
+                } => {
+                    if selected_chat == Some(chat_id) && from_message_id > 0 {
+                        pending_history
+                            .insert(request_id, (chat_id, from_message_id, PageDirection::Older));
+                        client.send(&history_query(
+                            chat_id,
+                            from_message_id,
+                            request_id,
+                            PageDirection::Older,
+                        ));
+                    }
+                }
+                BackendCommand::LoadNewer {
+                    chat_id,
+                    request_id,
+                    from_message_id,
+                } => {
+                    if selected_chat == Some(chat_id) && from_message_id > 0 {
+                        pending_history
+                            .insert(request_id, (chat_id, from_message_id, PageDirection::Newer));
+                        client.send(&history_query(
+                            chat_id,
+                            from_message_id,
+                            request_id,
+                            PageDirection::Newer,
+                        ));
+                    }
                 }
                 BackendCommand::SendText { chat_id, text } => {
                     if !text.trim().is_empty()
@@ -331,6 +425,7 @@ struct UpdateContext<'a> {
     key: &'a str,
     chats: &'a mut HashMap<i64, ChatSummary>,
     selected_chat: &'a mut Option<i64>,
+    pending_history: &'a mut HashMap<u64, (i64, i64, PageDirection)>,
     events: &'a Sender<BackendEvent>,
     closed: &'a mut bool,
     prefer_qr: &'a mut bool,
@@ -343,6 +438,7 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
         key,
         chats,
         selected_chat,
+        pending_history,
         events,
         closed,
         prefer_qr,
@@ -526,35 +622,138 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
                 }
             }
         }
+        "updateMessageContent" => {
+            if let (Some(chat_id), Some(message_id)) = (
+                update.get("chat_id").and_then(Value::as_i64),
+                update.get("message_id").and_then(Value::as_i64),
+            ) {
+                let message = MessageView {
+                    id: message_id,
+                    date: 0,
+                    sender_id: String::new(),
+                    text: message_content_text(&update["new_content"]),
+                    outgoing: false,
+                    delivery: DeliveryState::Received,
+                };
+                let _ = events.send_blocking(BackendEvent::MessageEdited { chat_id, message });
+            }
+        }
+        "updateMessageSendSucceeded" => {
+            if let (Some(old_message_id), Some(message)) = (
+                update.get("old_message_id").and_then(Value::as_i64),
+                update.get("message"),
+            ) {
+                let chat_id = message
+                    .get("chat_id")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default();
+                let _ = events.send_blocking(BackendEvent::MessageDeleted {
+                    chat_id,
+                    message_id: old_message_id,
+                });
+                let _ = events.send_blocking(BackendEvent::NewMessage {
+                    chat_id,
+                    message: message_view(message),
+                });
+            }
+        }
+        "updateDeleteMessages" => {
+            if let (Some(chat_id), Some(ids)) = (
+                update.get("chat_id").and_then(Value::as_i64),
+                update.get("message_ids").and_then(Value::as_array),
+            ) {
+                for message_id in ids.iter().filter_map(Value::as_i64) {
+                    let _ = events.send_blocking(BackendEvent::MessageDeleted {
+                        chat_id,
+                        message_id,
+                    });
+                }
+            }
+        }
         "messages" => {
             if let Some(messages) = update.get("messages").and_then(Value::as_array) {
-                let chat_id = messages
-                    .first()
-                    .and_then(|m| m.get("chat_id"))
-                    .and_then(Value::as_i64)
-                    .or(*selected_chat)
-                    .unwrap_or_default();
-                let messages = messages.iter().map(message_view).collect();
-                let _ = events.send_blocking(BackendEvent::History { chat_id, messages });
+                let request_id = update.get("@extra").and_then(Value::as_u64);
+                if let Some((chat_id, from_id, direction)) =
+                    request_id.and_then(|id| pending_history.remove(&id))
+                {
+                    let views: Vec<_> = messages.iter().map(message_view).collect();
+                    let has_older = match direction {
+                        PageDirection::Initial => !views.is_empty(),
+                        PageDirection::Older => views.iter().any(|message| message.id < from_id),
+                        PageDirection::Newer => true,
+                    };
+                    let has_newer = match direction {
+                        PageDirection::Initial => false,
+                        PageDirection::Older => true,
+                        PageDirection::Newer => views.iter().any(|message| message.id > from_id),
+                    };
+                    let _ = events.send_blocking(BackendEvent::History {
+                        chat_id,
+                        request_id: request_id.unwrap_or_default(),
+                        messages: views,
+                        has_older,
+                        has_newer,
+                        direction,
+                    });
+                }
             }
         }
         "error" => {
             let code = update.get("code").and_then(Value::as_i64).unwrap_or(0);
             let error_name = update.get("message").and_then(Value::as_str).unwrap_or("");
-            let _ =
-                events.send_blocking(BackendEvent::Error(tdlib_error_message(code, error_name)));
+            let message = tdlib_error_message(code, error_name);
+            if let Some(request_id) = update.get("@extra").and_then(Value::as_u64) {
+                if let Some((chat_id, _, _)) = pending_history.remove(&request_id) {
+                    let _ = events.send_blocking(BackendEvent::HistoryError {
+                        chat_id,
+                        request_id,
+                        message,
+                    });
+                    return;
+                }
+            }
+            let _ = events.send_blocking(BackendEvent::Error(message));
         }
         "updateMessageSendFailed" => {
             let code = update
                 .pointer("/error_code")
                 .and_then(Value::as_i64)
                 .unwrap_or(0);
-            let _ = events.send_blocking(BackendEvent::Error(format!(
-                "Message was not sent (code {code})."
-            )));
+            if let (Some(message), Some(old_message_id)) = (
+                update.get("message"),
+                update.get("old_message_id").and_then(Value::as_i64),
+            ) {
+                let chat_id = message
+                    .get("chat_id")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default();
+                let _ = events.send_blocking(BackendEvent::MessageDelivery {
+                    chat_id,
+                    message_id: old_message_id,
+                    delivery: DeliveryState::Failed,
+                });
+            } else {
+                let _ = events.send_blocking(BackendEvent::Error(format!(
+                    "Message was not sent (code {code})."
+                )));
+            }
         }
         _ => {}
     }
+}
+
+fn history_query(
+    chat_id: i64,
+    from_message_id: i64,
+    request_id: u64,
+    direction: PageDirection,
+) -> Value {
+    json!({
+        "@type":"getChatHistory", "chat_id":chat_id,
+        "from_message_id":from_message_id,
+        "offset":if direction == PageDirection::Newer { 1 - PAGE_SIZE } else { 0 },
+        "limit":PAGE_SIZE, "only_local":false, "@extra":request_id
+    })
 }
 
 fn tdlib_error_message(code: i64, error_name: &str) -> String {
@@ -656,16 +855,49 @@ fn emit_chats(chats: &HashMap<i64, ChatSummary>, events: &Sender<BackendEvent>) 
 fn message_view(value: &Value) -> MessageView {
     MessageView {
         id: value.get("id").and_then(Value::as_i64).unwrap_or_default(),
+        date: value
+            .get("date")
+            .and_then(Value::as_i64)
+            .unwrap_or_default(),
+        sender_id: value
+            .pointer("/sender_id/user_id")
+            .and_then(Value::as_i64)
+            .map(|id| format!("user:{id}"))
+            .or_else(|| {
+                value
+                    .pointer("/sender_id/chat_id")
+                    .and_then(Value::as_i64)
+                    .map(|id| format!("chat:{id}"))
+            })
+            .unwrap_or_default(),
         text: message_text(value),
         outgoing: value
             .get("is_outgoing")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        delivery: match value
+            .pointer("/sending_state/@type")
+            .and_then(Value::as_str)
+        {
+            Some("messageSendingStatePending") => DeliveryState::Sending,
+            Some("messageSendingStateFailed") => DeliveryState::Failed,
+            _ if value
+                .get("is_outgoing")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+            {
+                DeliveryState::Sent
+            }
+            _ => DeliveryState::Received,
+        },
     }
 }
 
 fn message_text(value: &Value) -> String {
-    let content = &value["content"];
+    message_content_text(&value["content"])
+}
+
+fn message_content_text(content: &Value) -> String {
     match content.get("@type").and_then(Value::as_str).unwrap_or("") {
         "messageText" => content
             .pointer("/text/text")
@@ -983,6 +1215,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn history_requests_use_tdlib_page_limits_and_request_correlation() {
+        let initial = history_query(42, 0, 17, PageDirection::Initial);
+        assert_eq!(initial["@type"], "getChatHistory");
+        assert_eq!(initial["chat_id"], 42);
+        assert_eq!(initial["from_message_id"], 0);
+        assert_eq!(initial["limit"], PAGE_SIZE);
+        assert_eq!(initial["@extra"], 17);
+        let older = history_query(42, 123, 18, PageDirection::Older);
+        assert_eq!(older["from_message_id"], 123);
+        assert_eq!(older["@extra"], 18);
+        let newer = history_query(42, 200, 19, PageDirection::Newer);
+        assert_eq!(newer["offset"], 1 - PAGE_SIZE);
+    }
+
+    #[test]
     fn tdlib_authorization_states_map_to_the_expected_ui_transitions() {
         assert_eq!(
             authorization_state_from_tdlib("authorizationStateWaitOtherDeviceConfirmation"),
@@ -1017,8 +1264,11 @@ mod tests {
             message_view(&value),
             MessageView {
                 id: 11,
+                date: 0,
+                sender_id: String::new(),
                 text: "hello".into(),
-                outgoing: true
+                outgoing: true,
+                delivery: DeliveryState::Sent,
             }
         );
     }
