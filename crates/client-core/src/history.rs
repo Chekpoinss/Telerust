@@ -16,6 +16,34 @@ pub enum DeliveryState {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaFile {
+    pub id: i32,
+    pub name: String,
+    pub mime_type: String,
+    pub size: i64,
+    pub width: i32,
+    pub height: i32,
+    pub duration: i32,
+    pub local_path: Option<String>,
+    pub downloaded: bool,
+    pub downloading: bool,
+    pub downloaded_size: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageKind {
+    Text,
+    Photo(MediaFile),
+    Document(MediaFile),
+    Video(MediaFile),
+    Sticker(MediaFile),
+    Voice(MediaFile),
+    Audio(MediaFile),
+    Service(String),
+    Unsupported(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageDirection {
     Initial,
@@ -29,6 +57,7 @@ pub struct Message {
     pub date: i64,
     pub sender_id: String,
     pub text: String,
+    pub kind: MessageKind,
     pub outgoing: bool,
     pub delivery: DeliveryState,
 }
@@ -231,6 +260,16 @@ impl HistoryWindow {
     }
 
     pub fn edit_text(&mut self, chat_id: ChatId, message_id: i64, text: String) -> bool {
+        self.edit_content(chat_id, message_id, text, MessageKind::Text)
+    }
+
+    pub fn edit_content(
+        &mut self,
+        chat_id: ChatId,
+        message_id: i64,
+        text: String,
+        kind: MessageKind,
+    ) -> bool {
         if self.chat_id != Some(chat_id) {
             return false;
         }
@@ -240,6 +279,7 @@ impl HistoryWindow {
             .find(|message| message.id == message_id)
         {
             message.text = text;
+            message.kind = kind;
             true
         } else {
             false
@@ -267,6 +307,56 @@ impl HistoryWindow {
         }
     }
 
+    pub fn update_file(
+        &mut self,
+        file_id: i32,
+        local_path: Option<String>,
+        downloaded: bool,
+        downloading: bool,
+        downloaded_size: i64,
+    ) -> bool {
+        fn update(
+            kind: &mut MessageKind,
+            id: i32,
+            path: &Option<String>,
+            downloaded: bool,
+            downloading: bool,
+            downloaded_size: i64,
+        ) -> bool {
+            let file = match kind {
+                MessageKind::Photo(file)
+                | MessageKind::Document(file)
+                | MessageKind::Video(file)
+                | MessageKind::Sticker(file)
+                | MessageKind::Voice(file)
+                | MessageKind::Audio(file) => file,
+                MessageKind::Text | MessageKind::Service(_) | MessageKind::Unsupported(_) => {
+                    return false
+                }
+            };
+            if file.id != id {
+                return false;
+            }
+            file.local_path = path.clone();
+            file.downloaded = downloaded;
+            file.downloading = downloading;
+            file.downloaded_size = downloaded_size;
+            true
+        }
+        let mut changed = false;
+        for message in &mut self.messages {
+            changed |= update(
+                &mut message.kind,
+                file_id,
+                &local_path,
+                downloaded,
+                downloading,
+                downloaded_size,
+            );
+        }
+        changed
+    }
+
     fn start_request(&mut self) -> u64 {
         let id = self.next_request;
         self.next_request = self.next_request.wrapping_add(1).max(1);
@@ -290,6 +380,7 @@ mod tests {
             date,
             sender_id: "user:synthetic".into(),
             text: format!("synthetic {id}"),
+            kind: MessageKind::Text,
             outgoing: false,
             delivery: DeliveryState::Received,
         }
@@ -414,5 +505,40 @@ mod tests {
         assert_eq!(history.messages().first().unwrap().id, 999);
         assert!(history.has_older());
         assert!(history.has_newer());
+    }
+
+    #[test]
+    fn file_update_refreshes_matching_media_only() {
+        let mut history = HistoryWindow::default();
+        let request_id = history.open_chat(ChatId(30));
+        let mut item = message(1, 1);
+        item.kind = MessageKind::Document(MediaFile {
+            id: 99,
+            name: "report.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 2048,
+            width: 0,
+            height: 0,
+            duration: 0,
+            local_path: None,
+            downloaded: false,
+            downloading: false,
+            downloaded_size: 0,
+        });
+        assert!(history.apply_page(HistoryPage {
+            chat_id: ChatId(30),
+            request_id,
+            messages: vec![item],
+            has_older: false,
+            has_newer: false,
+            direction: PageDirection::Initial,
+        }));
+        assert!(history.update_file(99, Some("/synthetic/report.pdf".into()), true, false, 2048));
+        let MessageKind::Document(file) = &history.messages()[0].kind else {
+            panic!("document kind changed");
+        };
+        assert!(file.downloaded);
+        assert_eq!(file.local_path.as_deref(), Some("/synthetic/report.pdf"));
+        assert!(!history.update_file(100, None, false, false, 0));
     }
 }

@@ -61,3 +61,26 @@ The benchmark was run in a real Wayland session. Screenshot capture was blocked 
 | 2026-11-10 | Окно auth UI, без config/backend, 10 s после 2 s запуска | 174328 KiB | 86828 KiB | 47816 KiB | 0.100% |
 
 Это один диагностический прогон, не baseline с разбросом. Измерены только окно авторизации и отсутствие backend; нет времён до первой отрисовки, открытого чата, TDLib sync, сети и сессии. На Fedora 45 Wayland release binary и установленный launcher также удерживали окно 8 секунд при timeout smoke check; `desktop-file-validate` прошёл. Скриншотный осмотр GNOME меню/окна не выполнялся.
+
+## 2026-11-10: повторные замеры модульного списка и карточек
+
+Пять отдельных запусков на Fedora 45 GNOME Wayland, release build; каждый synthetic application использует отдельный GTK application ID, не читает настройки и не запускает TDLib. Команда: `TELERUST_BENCHMARK_REPEATS=5 scripts/benchmark-history-ui.sh`. RSS/PSS/USS снимались примерно через 2 секунды после запуска. CPU — первые 3 секунды после окончания 40 endpoint moves, поэтому включает возможную отложенную раскладку GTK. В `media_1000` каждый десятый message model был синтетической карточкой фото или документа; медиафайлы не скачивались.
+
+| Сценарий | Медиана RSS KiB | PSS KiB | USS KiB | Model build ms | CPU сразу после scroll, 3 s | Median endpoint moves | Peak bound rows / created |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 100 text | 193632 | 66224 | 53356 | 8 | 1.67% | 997 ms | 101 / 101 |
+| 1,000 text | 198960 | 70971 | 58116 | 47 | 6.67% | 7729 ms | 206 / 224 |
+| 10,000 input, bounded to 1,000 | 200756 | 72678 | 59804 | 54 | 7.33% | 2853 ms | 206 / 224 |
+| 1,000, about 200 synthetic media cards | 199468 | 71608 | 58780 | 51 | 0.67% | 2988 ms | 206 / 224 |
+
+The previous isolated 8.33% CPU result is not evidence of persistent idle load. A follow-up 10,000-message run measured 7.33% in the first 3-second interval after scroll, then 0.00%, 0.33%, 0.00%, and 0.33% over four subsequent 3-second intervals. A 1,000-message run measured 7.67%, then 0.00%, 0.00%, 0.00%, and 0.33%. This points to transient GTK relayout immediately after synthetic scroll; process utilization settles below 0.34% in these runs. This is diagnostic, not a long-duration idle baseline.
+
+`GtkListView` remains capped at 1,001 timeline entries and 206 peak realized rows in the 1k/10k runs; it did not create one row widget per retained message. RSS/PSS/USS include GTK/libadwaita startup and loaded libraries. The media case measures metadata-card construction only, not decoding, downloads, image-cache growth or a real chat switch. Scroll elapsed times show high run-to-run variance on the 1k case and are not frame-rate measurements. No Telegram Desktop comparison is implied.
+
+### Chat switching and post-scroll idle follow-up
+
+The synthetic switch case was repeated five times after allowing the GTK window to lay out. Each repeat replaced the bounded 1,000-message history 12 times, with the window geometry confirmed as 320×574 chat list and 695×551 message view before stress. Median results: 8,490 ms for 12 model replacements; RSS/PSS/USS 200,540/72,635/59,828 KiB; 206 peak realized rows and 11,410 row factory creations across the stress. The last number is cumulative row reuse/recreation across switches, not simultaneously resident widgets. This synthetic scenario does not exercise live TDLib/network switching.
+
+The post-scroll CPU samples in the five-run table above were the first 3-second interval and include delayed layout work. Follow-up intervals on prior 1k and 10k runs settled at 0–0.33% for four further 3-second intervals. The five-repeat synthetic chat-switch run measured 0–0.33% in its 3-second post-stress samples (median 0.00%). This supports a transient-relayout explanation for the earlier 8.33% sample in this workload; it is not a 10-minute idle measurement.
+
+Pixel-level visual inspection remains unavailable: GNOME Wayland rejected the screenshot request and `grim` had no supported capture protocol in this environment. No compositor restriction was bypassed. Synthetic geometry and GTK factory counters are available, but do not replace visual review.

@@ -11,7 +11,9 @@ use std::{
 };
 use telerust_client_core::{
     events::AuthorizationState,
-    history::{ChatId, DeliveryState, HistoryPage, HistoryWindow, Message, PageDirection},
+    history::{
+        ChatId, DeliveryState, HistoryPage, HistoryWindow, Message, MessageKind, PageDirection,
+    },
     settings::Settings,
 };
 use telerust_tdlib_bridge::{AuthPrompt, BackendCommand, BackendEvent, ChatSummary, MessageView};
@@ -40,13 +42,17 @@ struct Ui {
 }
 
 pub fn run() {
-    let application = adw::Application::builder()
-        .application_id("org.telerust.Client")
-        .build();
     let synthetic_count = std::env::var("TELERUST_SYNTHETIC_HISTORY")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|count| *count > 0);
+    let application = adw::Application::builder()
+        .application_id(if synthetic_count.is_some() {
+            "org.telerust.Client.Synthetic"
+        } else {
+            "org.telerust.Client"
+        })
+        .build();
     application.connect_activate(move |app| build_window(app, synthetic_count));
     application.run();
 }
@@ -101,7 +107,7 @@ fn build_window(app: &adw::Application, synthetic_count: Option<usize>) {
         credentials_button,
     ) = login_view();
     stack.add_named(&login_page, Some("login"));
-    let main_page = main_view();
+    let main_page = main_view(command_tx.clone());
     stack.add_named(&main_page.0, Some("main"));
     stack.set_visible_child_name("login");
     window.set_content(Some(&content));
@@ -291,7 +297,9 @@ fn wire_credentials(ui: &Ui, window: &adw::ApplicationWindow) {
 }
 
 // Return page plus widgets which need event updates.
-fn main_view() -> (
+fn main_view(
+    command_tx: async_channel::Sender<BackendCommand>,
+) -> (
     gtk::Box,
     ChatList,
     ChatHeader,
@@ -318,7 +326,7 @@ fn main_view() -> (
     heading_row.append(&heading);
     heading_row.append(&logout);
     sidebar.append(&heading_row);
-    let chats = ChatList::new();
+    let chats = ChatList::new(command_tx.clone());
     sidebar.append(&chats.search);
     let chat_scroll = gtk::ScrolledWindow::builder()
         .child(&chats.widget)
@@ -332,7 +340,7 @@ fn main_view() -> (
     let conversation = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let chat_header = ChatHeader::new();
     conversation.append(&chat_header.widget);
-    let messages = MessageList::new();
+    let messages = MessageList::new(command_tx);
     conversation.append(&messages.scroller);
     let composer = Composer::new();
     conversation.append(&composer.widget);
@@ -443,12 +451,12 @@ fn wire_messages(ui: &Ui) {
     let messages = ui.messages.clone();
     let header = ui.chat_header.clone();
     let history = ui.history.clone();
-    ui.chats.widget.connect_row_activated(move |_, row| {
-        if let Ok(chat_id) = row.widget_name().parse::<i64>() {
+    let ui_chat_list = ui.chats.clone();
+    ui.chats.widget.connect_activate(move |_, position| {
+        if let Some(chat) = ui_chat_list.chat_at(position) {
+            let chat_id = chat.id;
             selected.set(Some(chat_id));
-            if let Some(title) = row.tooltip_text() {
-                header.set_chat(&title);
-            }
+            header.set_chat(&chat);
             let request_id = history.borrow_mut().open_chat(ChatId(chat_id));
             messages.render(&history.borrow(), false);
             if tx
@@ -563,7 +571,14 @@ fn attach_events(ui: &Ui, events: async_channel::Receiver<BackendEvent>) {
                         .set_text("Telegram returned an invalid QR login link."),
                 },
                 BackendEvent::Prompt(prompt) => set_prompt(&ui, prompt),
-                BackendEvent::Chats(chats) => ui.chats.render(chats, ui.selected_chat.get()),
+                BackendEvent::Chats(chats) => {
+                    if let Some(selected) = ui.selected_chat.get() {
+                        if let Some(chat) = chats.iter().find(|chat| chat.id == selected) {
+                            ui.chat_header.set_chat(chat);
+                        }
+                    }
+                    ui.chats.render(chats, ui.selected_chat.get());
+                }
                 BackendEvent::History { chat_id, request_id, messages, has_older, has_newer, direction } => {
                     let history_messages = messages.into_iter().map(from_backend_message).collect();
                     if ui.history.borrow_mut().apply_page(HistoryPage { chat_id: ChatId(chat_id), request_id, messages: history_messages, has_older, has_newer, direction }) {
@@ -581,7 +596,7 @@ fn attach_events(ui: &Ui, events: async_channel::Receiver<BackendEvent>) {
                     }
                 }
                 BackendEvent::MessageEdited { chat_id, message } => {
-                    if ui.history.borrow_mut().edit_text(ChatId(chat_id), message.id, message.text) {
+                    if ui.history.borrow_mut().edit_content(ChatId(chat_id), message.id, message.text, message.kind) {
                         ui.messages.render(&ui.history.borrow(), false);
                     }
                 }
@@ -600,6 +615,17 @@ fn attach_events(ui: &Ui, events: async_channel::Receiver<BackendEvent>) {
                     if ui.history.borrow_mut().update_delivery(ChatId(chat_id), message_id, delivery) {
                         ui.messages.render(&ui.history.borrow(), false);
                     }
+                }
+                BackendEvent::FileUpdated { file_id, local_path, downloaded, downloading, downloaded_size } => {
+                    if ui.history.borrow_mut().update_file(file_id, local_path, downloaded, downloading, downloaded_size) {
+                        ui.messages.render(&ui.history.borrow(), false);
+                    }
+                }
+                BackendEvent::FileDownloadFailed { file_id, message } => {
+                    if ui.history.borrow_mut().update_file(file_id, None, false, false, 0) {
+                        ui.messages.render(&ui.history.borrow(), false);
+                    }
+                    ui.status.set_text(&message);
                 }
                 BackendEvent::Status(text) => ui.status.set_text(&text),
                 BackendEvent::Error(text) => {
@@ -660,6 +686,7 @@ fn from_backend_message(message: MessageView) -> Message {
         date: message.date,
         sender_id: message.sender_id,
         text: message.text,
+        kind: message.kind,
         outgoing: message.outgoing,
         delivery: match message.delivery {
             telerust_tdlib_bridge::DeliveryState::Received => DeliveryState::Received,
@@ -676,20 +703,54 @@ fn show_synthetic_history(ui: &Ui, count: usize) {
     ui.status.set_text(&format!(
         "Synthetic UI benchmark: requested {count}, displaying at most 1,000 messages. No Telegram session is opened."
     ));
-    ui.chats.render(
-        vec![ChatSummary {
-            id: 7,
-            title: "Synthetic conversation — тест ✨".into(),
-            preview: "Deterministic local benchmark data".into(),
-            sort_date: 1_700_000_000,
-            is_channel: false,
-        }],
-        Some(7),
-    );
-    ui.chat_header.set_chat("Synthetic conversation — тест ✨");
+    let synthetic_chat = ChatSummary {
+        id: 7,
+        title: "Synthetic conversation — тест ✨".into(),
+        preview: "Deterministic local benchmark data".into(),
+        sort_date: 1_700_000_000,
+        is_channel: false,
+        photo_file_id: None,
+        photo_path: None,
+    };
+    ui.chats.render(vec![synthetic_chat.clone()], Some(7));
+    ui.chat_header.set_chat(&synthetic_chat);
     let request_id = ui.history.borrow_mut().open_chat(ChatId(7));
+    let show_media = std::env::var_os("TELERUST_SYNTHETIC_MEDIA").is_some();
+    let switch_stress = std::env::var_os("TELERUST_SYNTHETIC_CHAT_SWITCHES").is_some();
     let messages = (0..count)
-        .map(|index| Message {
+        .map(|index| {
+            let kind = if show_media && index % 10 == 3 {
+                MessageKind::Document(telerust_client_core::history::MediaFile {
+                    id: 20_000 + index as i32,
+                    name: format!("synthetic-report-{index}.pdf"),
+                    mime_type: "application/pdf".into(),
+                    size: 256 * 1024 + index as i64,
+                    width: 0,
+                    height: 0,
+                    duration: 0,
+                    local_path: None,
+                    downloaded: false,
+                    downloading: false,
+                    downloaded_size: 0,
+                })
+            } else if show_media && index % 10 == 7 {
+                MessageKind::Photo(telerust_client_core::history::MediaFile {
+                    id: 30_000 + index as i32,
+                    name: "Synthetic image".into(),
+                    mime_type: "image/jpeg".into(),
+                    size: 96 * 1024,
+                    width: 320,
+                    height: 240,
+                    duration: 0,
+                    local_path: None,
+                    downloaded: false,
+                    downloading: false,
+                    downloaded_size: 0,
+                })
+            } else {
+                MessageKind::Text
+            };
+            Message {
             id: index as i64 + 1,
             date: 1_700_000_000 + index as i64 * 60,
             sender_id: if index % 3 == 0 { "user:2" } else { "user:1" }.into(),
@@ -699,9 +760,10 @@ fn show_synthetic_history(ui: &Ui, count: usize) {
                 2 => format!("Short {index}"),
                 _ => format!("Emoji sequence {index} 🚀 🌙 🦀 🎉"),
             },
+            kind,
             outgoing: index % 3 != 0,
             delivery: DeliveryState::Sent,
-        })
+        }})
         .collect();
     ui.history.borrow_mut().apply_page(HistoryPage {
         chat_id: ChatId(7),
@@ -721,13 +783,107 @@ fn show_synthetic_history(ui: &Ui, count: usize) {
     );
     let metrics = ui.messages.metrics.clone();
     let model = ui.messages.store.clone();
+    let chat_list = ui.chats.widget.clone();
+    let message_view = ui.messages.scroller.clone();
+    let header = ui.chat_header.widget.clone();
+    let composer = ui.composer.widget.clone();
     gtk::glib::timeout_add_seconds_local(2, move || {
         eprintln!(
             "synthetic-history model_items={} realized_rows={} peak_realized_rows={} created_rows={}",
             model.n_items(), metrics.realized(), metrics.peak_realized(), metrics.created()
         );
+        eprintln!(
+            "synthetic-geometry chat_list={}x{} message_view={}x{} header={}x{} composer={}x{}",
+            chat_list.width(),
+            chat_list.height(),
+            message_view.width(),
+            message_view.height(),
+            header.width(),
+            header.height(),
+            composer.width(),
+            composer.height()
+        );
         gtk::glib::ControlFlow::Break
     });
+
+    if switch_stress {
+        let chats: Vec<_> = (0..8)
+            .map(|index| ChatSummary {
+                id: 7 + index,
+                title: format!("Synthetic chat {index} — русский ✨"),
+                preview: "Local chat switching fixture".into(),
+                sort_date: 1_700_000_000 - index,
+                is_channel: false,
+                photo_file_id: None,
+                photo_path: None,
+            })
+            .collect();
+        ui.chats.render(chats.clone(), Some(7));
+        let switch_ui = ui.clone();
+        let message_count = count.min(1_000);
+        gtk::glib::timeout_add_seconds_local(3, move || {
+            let switch_ui = switch_ui.clone();
+            let switch_chats = chats.clone();
+            let switch_index = Rc::new(Cell::new(0_u32));
+            let switch_counter = switch_index.clone();
+            let started = std::time::Instant::now();
+            gtk::glib::timeout_add_local(std::time::Duration::from_millis(180), move || {
+                let index = switch_counter.get();
+                let chat = &switch_chats[index as usize % switch_chats.len()];
+                switch_ui.selected_chat.set(Some(chat.id));
+                switch_ui.chat_header.set_chat(chat);
+                let request_id = switch_ui.history.borrow_mut().open_chat(ChatId(chat.id));
+                let messages = (0..message_count)
+                    .map(|message_index| Message {
+                        id: message_index as i64 + 1,
+                        date: 1_700_000_000 + message_index as i64 * 45,
+                        sender_id: if message_index % 2 == 0 {
+                            "user:synthetic-a"
+                        } else {
+                            "user:synthetic-b"
+                        }
+                        .into(),
+                        text: format!(
+                            "Chat {} synthetic message {} — emoji 🙂",
+                            chat.id, message_index
+                        ),
+                        kind: MessageKind::Text,
+                        outgoing: message_index % 2 == 1,
+                        delivery: DeliveryState::Received,
+                    })
+                    .collect();
+                switch_ui.history.borrow_mut().apply_page(HistoryPage {
+                    chat_id: ChatId(chat.id),
+                    request_id,
+                    messages,
+                    has_older: false,
+                    has_newer: false,
+                    direction: PageDirection::Initial,
+                });
+                switch_ui
+                    .messages
+                    .render(&switch_ui.history.borrow(), false);
+                let next = index + 1;
+                switch_counter.set(next);
+                if next >= 12 {
+                    eprintln!(
+                        "synthetic-chat-switches count=12 messages_per_chat={} elapsed_ms={} retained={} model_items={} peak_realized_rows={} created_rows={}",
+                        message_count,
+                        started.elapsed().as_millis(),
+                        switch_ui.history.borrow().messages().len(),
+                        switch_ui.messages.store.n_items(),
+                        switch_ui.messages.metrics.peak_realized(),
+                        switch_ui.messages.metrics.created()
+                    );
+                    gtk::glib::ControlFlow::Break
+                } else {
+                    gtk::glib::ControlFlow::Continue
+                }
+            });
+            gtk::glib::ControlFlow::Break
+        });
+        return;
+    }
 
     let adjustment = ui.messages.scroller.vadjustment();
     let step = Rc::new(Cell::new(0_u32));

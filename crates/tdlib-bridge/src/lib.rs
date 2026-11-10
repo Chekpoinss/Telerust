@@ -5,7 +5,7 @@ use async_channel::{Receiver, Sender};
 use libloading::Library;
 use serde_json::{json, Value};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ffi::{CStr, CString},
     os::raw::c_char,
     path::{Path, PathBuf},
@@ -14,7 +14,7 @@ use std::{
 };
 use telerust_client_core::{
     events::AuthorizationState,
-    history::{PageDirection, PAGE_SIZE},
+    history::{MediaFile, MessageKind, PageDirection, PAGE_SIZE},
     settings::Settings,
 };
 
@@ -25,6 +25,8 @@ pub struct ChatSummary {
     pub preview: String,
     pub sort_date: i64,
     pub is_channel: bool,
+    pub photo_file_id: Option<i32>,
+    pub photo_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,7 @@ pub struct MessageView {
     pub date: i64,
     pub sender_id: String,
     pub text: String,
+    pub kind: MessageKind,
     pub outgoing: bool,
     pub delivery: DeliveryState,
 }
@@ -92,6 +95,17 @@ pub enum BackendEvent {
         message_id: i64,
         delivery: DeliveryState,
     },
+    FileUpdated {
+        file_id: i32,
+        local_path: Option<String>,
+        downloaded: bool,
+        downloading: bool,
+        downloaded_size: i64,
+    },
+    FileDownloadFailed {
+        file_id: i32,
+        message: String,
+    },
     Status(String),
     Error(String),
 }
@@ -123,6 +137,9 @@ pub enum BackendCommand {
     SendText {
         chat_id: i64,
         text: String,
+    },
+    DownloadFile {
+        file_id: i32,
     },
     Shutdown,
 }
@@ -246,6 +263,7 @@ fn run_inner(
     let mut chats: HashMap<i64, ChatSummary> = HashMap::new();
     let mut selected_chat = None;
     let mut pending_history: HashMap<u64, (i64, i64, PageDirection)> = HashMap::new();
+    let mut requested_files = HashSet::new();
     let mut closed = false;
     let mut restart = false;
     while !closed {
@@ -260,6 +278,7 @@ fn run_inner(
                     chats: &mut chats,
                     selected_chat: &mut selected_chat,
                     pending_history: &mut pending_history,
+                    requested_files: &mut requested_files,
                     events,
                     closed: &mut closed,
                     prefer_qr,
@@ -369,6 +388,11 @@ fn run_inner(
                         }));
                     }
                 }
+                BackendCommand::DownloadFile { file_id } => {
+                    if file_id > 0 && requested_files.insert(file_id) {
+                        client.send(&download_file_query(file_id));
+                    }
+                }
                 BackendCommand::Shutdown => {
                     restart = false;
                     close_client(&mut client);
@@ -426,6 +450,7 @@ struct UpdateContext<'a> {
     chats: &'a mut HashMap<i64, ChatSummary>,
     selected_chat: &'a mut Option<i64>,
     pending_history: &'a mut HashMap<u64, (i64, i64, PageDirection)>,
+    requested_files: &'a mut HashSet<i32>,
     events: &'a Sender<BackendEvent>,
     closed: &'a mut bool,
     prefer_qr: &'a mut bool,
@@ -439,6 +464,7 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
         chats,
         selected_chat,
         pending_history,
+        requested_files,
         events,
         closed,
         prefer_qr,
@@ -581,7 +607,7 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
                 emit_chats(chats, events);
             }
         }
-        "updateChatTitle" | "updateChatLastMessage" | "updateChatPosition" => {
+        "updateChatTitle" | "updateChatLastMessage" | "updateChatPosition" | "updateChatPhoto" => {
             let id = update.get("chat_id").and_then(Value::as_i64);
             if let Some(id) = id {
                 let chat = chats.entry(id).or_insert_with(|| ChatSummary {
@@ -590,6 +616,8 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
                     preview: String::new(),
                     sort_date: 0,
                     is_channel: false,
+                    photo_file_id: None,
+                    photo_path: None,
                 });
                 if update.get("@type").and_then(Value::as_str) == Some("updateChatTitle") {
                     if let Some(title) = update.get("title").and_then(Value::as_str) {
@@ -601,6 +629,9 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
                         chat.preview = message_text(message);
                         chat.sort_date = message.get("date").and_then(Value::as_i64).unwrap_or(0);
                     }
+                }
+                if update.get("@type").and_then(Value::as_str) == Some("updateChatPhoto") {
+                    update_chat_photo(chat, &update["photo"]);
                 }
                 emit_chats(chats, events);
             }
@@ -627,11 +658,13 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
                 update.get("chat_id").and_then(Value::as_i64),
                 update.get("message_id").and_then(Value::as_i64),
             ) {
+                let (text, kind) = message_content(&update["new_content"]);
                 let message = MessageView {
                     id: message_id,
                     date: 0,
                     sender_id: String::new(),
-                    text: message_content_text(&update["new_content"]),
+                    text,
+                    kind,
                     outgoing: false,
                     delivery: DeliveryState::Received,
                 };
@@ -702,6 +735,19 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
             let code = update.get("code").and_then(Value::as_i64).unwrap_or(0);
             let error_name = update.get("message").and_then(Value::as_str).unwrap_or("");
             let message = tdlib_error_message(code, error_name);
+            if let Some(file_id) = update
+                .get("@extra")
+                .and_then(Value::as_str)
+                .and_then(|extra| extra.strip_prefix("telerust-file-"))
+                .and_then(|id| id.parse::<i32>().ok())
+            {
+                requested_files.remove(&file_id);
+                let _ = events.send_blocking(BackendEvent::FileDownloadFailed {
+                    file_id,
+                    message: format!("File download failed (Telegram code {code}). You can retry."),
+                });
+                return;
+            }
             if let Some(request_id) = update.get("@extra").and_then(Value::as_u64) {
                 if let Some((chat_id, _, _)) = pending_history.remove(&request_id) {
                     let _ = events.send_blocking(BackendEvent::HistoryError {
@@ -738,6 +784,57 @@ fn handle_update(client: &mut TdClient, update: Value, context: UpdateContext<'_
                 )));
             }
         }
+        "updateFile" => {
+            if let Some(file) = update.get("file") {
+                if let Some(file_id) = file.get("id").and_then(Value::as_i64) {
+                    let local = &file["local"];
+                    let downloaded = local
+                        .get("is_downloading_completed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let local_path = local
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_owned);
+                    let downloading = local
+                        .get("is_downloading_active")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let downloaded_size = local
+                        .get("downloaded_prefix_size")
+                        .and_then(Value::as_i64)
+                        .or_else(|| local.get("downloaded_size").and_then(Value::as_i64))
+                        .unwrap_or(0);
+                    if downloaded
+                        || !local
+                            .get("is_downloading_active")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                    {
+                        requested_files.remove(&(file_id as i32));
+                    }
+                    let _ = events.send_blocking(BackendEvent::FileUpdated {
+                        file_id: file_id as i32,
+                        local_path: local_path.clone(),
+                        downloaded,
+                        downloading,
+                        downloaded_size,
+                    });
+                    let changed_chat_photo = chats.values_mut().any(|chat| {
+                        if chat.photo_file_id == Some(file_id as i32) {
+                            chat.photo_path = local_path.clone().filter(|_| downloaded);
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    if changed_chat_photo {
+                        emit_chats(chats, events);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -753,6 +850,14 @@ fn history_query(
         "from_message_id":from_message_id,
         "offset":if direction == PageDirection::Newer { 1 - PAGE_SIZE } else { 0 },
         "limit":PAGE_SIZE, "only_local":false, "@extra":request_id
+    })
+}
+
+fn download_file_query(file_id: i32) -> Value {
+    json!({
+        "@type":"downloadFile", "file_id":file_id,
+        "priority":16, "offset":0, "limit":0, "synchronous":false,
+        "@extra":format!("telerust-file-{file_id}")
     })
 }
 
@@ -784,7 +889,7 @@ fn connection_status(state: &str) -> Option<&'static str> {
         "connectionStateConnectingToProxy" => Some("Connecting to Telegram through the configured proxy…"),
         "connectionStateConnecting" => Some("Connecting to Telegram…"),
         "connectionStateUpdating" => Some("Updating the Telegram connection…"),
-        "connectionStateReady" => Some("Connected to Telegram; waiting for authorization state…"),
+        "connectionStateReady" => Some("Connected to Telegram."),
         _ => None,
     }
 }
@@ -821,6 +926,7 @@ fn upsert_chat(value: &Value, chats: &mut HashMap<i64, ChatSummary>) {
         .and_then(Value::as_str)
         .unwrap_or("Chat")
         .to_owned();
+    let (photo_file_id, photo_path) = chat_photo_fields(&value["photo"]);
     let is_channel = value.pointer("/type/@type").and_then(Value::as_str)
         == Some("chatTypeSupergroup")
         && value
@@ -833,13 +939,34 @@ fn upsert_chat(value: &Value, chats: &mut HashMap<i64, ChatSummary>) {
         preview: String::new(),
         sort_date: 0,
         is_channel,
+        photo_file_id,
+        photo_path: photo_path.clone(),
     });
     item.title = title;
     item.is_channel = is_channel;
+    item.photo_file_id = photo_file_id;
+    item.photo_path = photo_path;
     if let Some(last) = last {
         item.preview = message_text(last);
         item.sort_date = last.get("date").and_then(Value::as_i64).unwrap_or(0);
     }
+}
+
+fn chat_photo_fields(photo: &Value) -> (Option<i32>, Option<String>) {
+    let file_id = photo
+        .pointer("/small/id")
+        .and_then(Value::as_i64)
+        .map(|id| id as i32);
+    let path = photo
+        .pointer("/small/local/path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned);
+    (file_id, path)
+}
+
+fn update_chat_photo(chat: &mut ChatSummary, photo: &Value) {
+    (chat.photo_file_id, chat.photo_path) = chat_photo_fields(photo);
 }
 
 fn emit_chats(chats: &HashMap<i64, ChatSummary>, events: &Sender<BackendEvent>) {
@@ -853,6 +980,7 @@ fn emit_chats(chats: &HashMap<i64, ChatSummary>, events: &Sender<BackendEvent>) 
 }
 
 fn message_view(value: &Value) -> MessageView {
+    let (text, kind) = message_content(&value["content"]);
     MessageView {
         id: value.get("id").and_then(Value::as_i64).unwrap_or_default(),
         date: value
@@ -870,7 +998,8 @@ fn message_view(value: &Value) -> MessageView {
                     .map(|id| format!("chat:{id}"))
             })
             .unwrap_or_default(),
-        text: message_text(value),
+        text,
+        kind,
         outgoing: value
             .get("is_outgoing")
             .and_then(Value::as_bool)
@@ -894,23 +1023,284 @@ fn message_view(value: &Value) -> MessageView {
 }
 
 fn message_text(value: &Value) -> String {
-    message_content_text(&value["content"])
+    message_content(&value["content"]).0
 }
 
-fn message_content_text(content: &Value) -> String {
-    match content.get("@type").and_then(Value::as_str).unwrap_or("") {
-        "messageText" => content
-            .pointer("/text/text")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        "messagePhoto" => "Photo".into(),
-        "messageVideo" => "Video".into(),
-        "messageDocument" => "File".into(),
-        "messageSticker" => "Sticker".into(),
-        "messageVoiceNote" => "Voice message".into(),
-        "messageAnimatedEmoji" => "Emoji".into(),
-        _ => "Message".into(),
+fn message_content(content: &Value) -> (String, MessageKind) {
+    let kind_name = content
+        .get("@type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let caption = content
+        .pointer("/caption/text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    match kind_name {
+        "messageText" => {
+            let text = content
+                .pointer("/text/text")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if text.trim().is_empty() {
+                (
+                    "Empty text message".into(),
+                    MessageKind::Unsupported("Empty text message".into()),
+                )
+            } else {
+                (text.to_owned(), MessageKind::Text)
+            }
+        }
+        "messagePhoto" => {
+            let sizes = content.pointer("/photo/sizes").and_then(Value::as_array);
+            let chosen = sizes.and_then(|sizes| {
+                let candidates: Vec<_> = sizes
+                    .iter()
+                    .filter_map(|size| {
+                        let file = size.get("photo")?;
+                        let width = size.get("width").and_then(Value::as_i64).unwrap_or(0) as i32;
+                        let height = size.get("height").and_then(Value::as_i64).unwrap_or(0) as i32;
+                        Some((file, width, height, width as i64 * height as i64))
+                    })
+                    .collect();
+                candidates
+                    .iter()
+                    .filter(|(_, width, height, _)| *width >= 240 && *height >= 160)
+                    .min_by_key(|(_, _, _, area)| *area)
+                    .or_else(|| candidates.iter().max_by_key(|(_, _, _, area)| *area))
+                    .map(|(file, width, height, _)| (*file, *width, *height))
+            });
+            let media = chosen.and_then(|(file, width, height)| {
+                media_file(Some(file), "Photo", "image/jpeg").map(|mut media| {
+                    media.width = width;
+                    media.height = height;
+                    media
+                })
+            });
+            (
+                if caption.is_empty() {
+                    "Photo".into()
+                } else {
+                    caption
+                },
+                media.map(MessageKind::Photo).unwrap_or_else(|| {
+                    MessageKind::Unsupported("Photo (file metadata unavailable)".into())
+                }),
+            )
+        }
+        "messageDocument" => {
+            let document = &content["document"];
+            let file = document.get("document");
+            let name = document
+                .get("file_name")
+                .and_then(Value::as_str)
+                .unwrap_or("Document")
+                .to_owned();
+            let mime = document
+                .get("mime_type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let media = media_file(file, &name, &mime);
+            (
+                if caption.is_empty() {
+                    name.clone()
+                } else {
+                    caption
+                },
+                media
+                    .map(MessageKind::Document)
+                    .unwrap_or_else(|| MessageKind::Unsupported(format!("Document: {name}"))),
+            )
+        }
+        "messageVideo" => {
+            let video = &content["video"];
+            let name = video
+                .get("file_name")
+                .and_then(Value::as_str)
+                .unwrap_or("Video")
+                .to_owned();
+            let mime = video
+                .get("mime_type")
+                .and_then(Value::as_str)
+                .unwrap_or("video/mp4")
+                .to_owned();
+            let mut media = media_file(video.get("video"), &name, &mime);
+            if let Some(media) = media.as_mut() {
+                media.duration = video.get("duration").and_then(Value::as_i64).unwrap_or(0) as i32;
+            }
+            (
+                if caption.is_empty() {
+                    name.clone()
+                } else {
+                    caption
+                },
+                media
+                    .map(MessageKind::Video)
+                    .unwrap_or_else(|| MessageKind::Unsupported(format!("Video: {name}"))),
+            )
+        }
+        "messageSticker" => {
+            let sticker = &content["sticker"];
+            let name = sticker
+                .get("emoji")
+                .and_then(Value::as_str)
+                .unwrap_or("Sticker")
+                .to_owned();
+            (
+                name.clone(),
+                media_file(sticker.get("sticker"), &name, "image/webp")
+                    .map(MessageKind::Sticker)
+                    .unwrap_or_else(|| MessageKind::Unsupported("Sticker".into())),
+            )
+        }
+        "messageVoiceNote" => {
+            let voice = &content["voice_note"];
+            let duration = voice.get("duration").and_then(Value::as_i64).unwrap_or(0) as i32;
+            let mut media = media_file(voice.get("voice"), "Voice message", "audio/ogg");
+            if let Some(media) = media.as_mut() {
+                media.duration = duration;
+            }
+            (
+                format!("Voice message · {}s", duration),
+                media
+                    .map(MessageKind::Voice)
+                    .unwrap_or_else(|| MessageKind::Unsupported("Voice message".into())),
+            )
+        }
+        "messageAudio" => {
+            let audio = &content["audio"];
+            let name = audio
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .or_else(|| audio.get("file_name").and_then(Value::as_str))
+                .unwrap_or("Audio")
+                .to_owned();
+            let media = media_file(
+                audio.get("audio"),
+                &name,
+                audio
+                    .get("mime_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("audio/mpeg"),
+            );
+            (
+                if caption.is_empty() {
+                    name.clone()
+                } else {
+                    caption
+                },
+                media
+                    .map(MessageKind::Audio)
+                    .unwrap_or_else(|| MessageKind::Unsupported(format!("Audio: {name}"))),
+            )
+        }
+        "messageAnimation" => {
+            let animation = &content["animation"];
+            let name = animation
+                .get("file_name")
+                .and_then(Value::as_str)
+                .unwrap_or("Animation")
+                .to_owned();
+            let media = media_file(animation.get("animation"), &name, "video/mp4");
+            (
+                if caption.is_empty() {
+                    name.clone()
+                } else {
+                    caption
+                },
+                media
+                    .map(MessageKind::Video)
+                    .unwrap_or_else(|| MessageKind::Unsupported(format!("Animation: {name}"))),
+            )
+        }
+        "messageAnimatedEmoji" => (
+            content
+                .pointer("/emoji/emoji")
+                .and_then(Value::as_str)
+                .unwrap_or("Animated emoji")
+                .to_owned(),
+            MessageKind::Unsupported("Animated emoji (preview unavailable)".into()),
+        ),
+        "messageContact" => (
+            "Contact card".into(),
+            MessageKind::Unsupported("Contact card".into()),
+        ),
+        "messageLocation" | "messageVenue" => (
+            "Location".into(),
+            MessageKind::Unsupported("Location card".into()),
+        ),
+        other
+            if other.starts_with("messageChat")
+                || other.starts_with("messagePin")
+                || other.starts_with("messagePayment") =>
+        {
+            let label = service_label(other);
+            (label.clone(), MessageKind::Service(label))
+        }
+        other => {
+            let label = format!("Unsupported message ({other})");
+            (label.clone(), MessageKind::Unsupported(label))
+        }
+    }
+}
+
+fn media_file(file: Option<&Value>, name: &str, mime_type: &str) -> Option<MediaFile> {
+    let file = file?;
+    let id = file.get("id")?.as_i64()? as i32;
+    let local = &file["local"];
+    let downloaded = local
+        .get("is_downloading_completed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let local_path = local
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned);
+    Some(MediaFile {
+        id,
+        name: name.to_owned(),
+        mime_type: if mime_type.is_empty() {
+            "application/octet-stream".into()
+        } else {
+            mime_type.to_owned()
+        },
+        size: file
+            .get("size")
+            .and_then(Value::as_i64)
+            .or_else(|| file.get("expected_size").and_then(Value::as_i64))
+            .unwrap_or(0),
+        width: 0,
+        height: 0,
+        duration: 0,
+        local_path,
+        downloaded,
+        downloading: local
+            .get("is_downloading_active")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        downloaded_size: local
+            .get("downloaded_prefix_size")
+            .and_then(Value::as_i64)
+            .or_else(|| local.get("downloaded_size").and_then(Value::as_i64))
+            .unwrap_or(0),
+    })
+}
+
+fn service_label(kind: &str) -> String {
+    match kind {
+        "messageChatAddMembers" => "Members added".into(),
+        "messageChatDeleteMember" => "Member removed".into(),
+        "messageChatJoinByLink" => "Joined via invite link".into(),
+        "messageChatJoinByRequest" => "Join request approved".into(),
+        "messageChatSetTitle" => "Chat title changed".into(),
+        "messageChatChangePhoto" => "Chat photo changed".into(),
+        "messageChatDeletePhoto" => "Chat photo removed".into(),
+        "messagePinMessage" => "Message pinned".into(),
+        "messagePaymentSuccessful" => "Payment completed".into(),
+        _ => "Service message".into(),
     }
 }
 
@@ -1267,6 +1657,7 @@ mod tests {
                 date: 0,
                 sender_id: String::new(),
                 text: "hello".into(),
+                kind: MessageKind::Text,
                 outgoing: true,
                 delivery: DeliveryState::Sent,
             }
@@ -1282,6 +1673,91 @@ mod tests {
     }
 
     #[test]
+    fn empty_and_unknown_message_contents_are_informational() {
+        let empty =
+            message_view(&json!({"id":5,"content":{"@type":"messageText","text":{"text":"  "}}}));
+        assert_eq!(empty.text, "Empty text message");
+        assert!(matches!(empty.kind, MessageKind::Unsupported(_)));
+        let unknown = message_view(&json!({"id":6,"content":{"@type":"messagePoll"}}));
+        assert!(unknown.text.contains("messagePoll"));
+        assert!(matches!(unknown.kind, MessageKind::Unsupported(_)));
+    }
+
+    #[test]
+    fn document_content_preserves_filename_mime_size_and_tdlib_file_id() {
+        let view = message_view(
+            &json!({"id":7,"content":{"@type":"messageDocument","caption":{"text":"notes"},"document":{"file_name":"notes.pdf","mime_type":"application/pdf","document":{"id":73,"size":4096,"local":{"path":"","is_downloading_completed":false}}}}}),
+        );
+        assert_eq!(view.text, "notes");
+        let MessageKind::Document(file) = view.kind else {
+            panic!("expected document model");
+        };
+        assert_eq!(file.id, 73);
+        assert_eq!(file.name, "notes.pdf");
+        assert_eq!(file.mime_type, "application/pdf");
+        assert_eq!(file.size, 4096);
+        assert!(!file.downloaded);
+    }
+
+    #[test]
+    fn photo_parser_selects_small_renderable_variant_with_dimensions() {
+        let view = message_view(
+            &json!({"id":8,"content":{"@type":"messagePhoto","photo":{"sizes":[{"width":90,"height":90,"photo":{"id":10,"size":1000,"local":{"path":"","is_downloading_completed":false}}},{"width":320,"height":240,"photo":{"id":11,"size":12000,"local":{"path":"","is_downloading_completed":false}}},{"width":1280,"height":960,"photo":{"id":12,"size":90000,"local":{"path":"","is_downloading_completed":false}}}]},"caption":{"text":"caption"}}}),
+        );
+        assert_eq!(view.text, "caption");
+        let MessageKind::Photo(file) = view.kind else {
+            panic!("expected photo model");
+        };
+        assert_eq!((file.id, file.width, file.height), (11, 320, 240));
+    }
+
+    #[test]
+    fn chat_photo_file_is_carried_for_lazy_avatar_loading() {
+        let mut chats = HashMap::new();
+        upsert_chat(
+            &json!({"id":14,"title":"Synthetic group","photo":{"small":{"id":140,"local":{"path":"","is_downloading_completed":false}}},"type":{"@type":"chatTypeBasicGroup"}}),
+            &mut chats,
+        );
+        let chat = chats.get(&14).unwrap();
+        assert_eq!(chat.photo_file_id, Some(140));
+        assert_eq!(chat.photo_path, None);
+    }
+
+    #[test]
+    fn avatar_photo_update_replaces_file_and_can_clear_photo() {
+        let mut chat = ChatSummary {
+            id: 14,
+            title: "Synthetic group".into(),
+            preview: String::new(),
+            sort_date: 0,
+            is_channel: false,
+            photo_file_id: Some(140),
+            photo_path: None,
+        };
+        update_chat_photo(
+            &mut chat,
+            &json!({"small":{"id":141,"local":{"path":"/synthetic/new-avatar.jpg"}}}),
+        );
+        assert_eq!(chat.photo_file_id, Some(141));
+        assert_eq!(
+            chat.photo_path.as_deref(),
+            Some("/synthetic/new-avatar.jpg")
+        );
+        update_chat_photo(&mut chat, &Value::Null);
+        assert_eq!(chat.photo_file_id, None);
+        assert_eq!(chat.photo_path, None);
+    }
+
+    #[test]
+    fn media_download_request_is_correlated_and_nonblocking() {
+        let request = download_file_query(55);
+        assert_eq!(request["@type"], "downloadFile");
+        assert_eq!(request["file_id"], 55);
+        assert_eq!(request["synchronous"], false);
+        assert_eq!(request["@extra"], "telerust-file-55");
+    }
+
+    #[test]
     fn channel_chat_updates_are_not_exposed_until_sponsored_support_exists() {
         let (sender, receiver) = async_channel::bounded(1);
         let chats = HashMap::from([(
@@ -1292,6 +1768,8 @@ mod tests {
                 preview: "hidden channel preview".into(),
                 sort_date: 12,
                 is_channel: true,
+                photo_file_id: None,
+                photo_path: None,
             },
         )]);
         emit_chats(&chats, &sender);
@@ -1339,7 +1817,7 @@ mod tests {
             .contains("GNOME network and proxy"));
         assert_eq!(
             connection_status("connectionStateReady"),
-            Some("Connected to Telegram; waiting for authorization state…")
+            Some("Connected to Telegram.")
         );
         assert_eq!(connection_status("unknownConnectionState"), None);
     }

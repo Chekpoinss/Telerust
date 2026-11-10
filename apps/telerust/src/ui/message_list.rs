@@ -1,6 +1,7 @@
 use super::message_row::{self, TimelineItem};
 use adw::prelude::*;
 use telerust_client_core::history::{HistoryWindow, Message};
+use telerust_tdlib_bridge::BackendCommand;
 
 #[derive(Clone)]
 pub struct MessageList {
@@ -10,10 +11,10 @@ pub struct MessageList {
 }
 
 impl MessageList {
-    pub fn new() -> Self {
+    pub fn new(command_tx: async_channel::Sender<BackendCommand>) -> Self {
         let store = gtk::gio::ListStore::new::<gtk::glib::BoxedAnyObject>();
         let selection = gtk::NoSelection::new(Some(store.clone()));
-        let (factory, metrics) = message_row::factory();
+        let (factory, metrics) = message_row::factory(command_tx);
         let view = gtk::ListView::new(Some(selection), Some(factory));
         view.set_vexpand(true);
         let scroller = gtk::ScrolledWindow::builder()
@@ -150,7 +151,7 @@ fn local_day(timestamp: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use telerust_client_core::history::DeliveryState;
+    use telerust_client_core::history::{DeliveryState, MessageKind};
 
     #[test]
     fn timeline_groups_adjacent_messages_and_marks_day_changes() {
@@ -159,6 +160,7 @@ mod tests {
             date,
             sender_id: sender_id.into(),
             text: format!("fixture {id}"),
+            kind: MessageKind::Text,
             outgoing: false,
             delivery: DeliveryState::Received,
         };

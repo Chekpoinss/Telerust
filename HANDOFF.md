@@ -11,8 +11,8 @@
 - GNOME manual proxy settings передаются в TDLib; environment proxy — fallback. Proxy credentials не сохраняются в Telerust config и не пишутся в логи.
 - Backend error больше не перетирается сообщением `Backend stopped.`; неверный API ID и основные auth ошибки получают безопасные понятные диагностики.
 - User-local release installer/launcher, GNOME desktop entry, icon. Uninstaller сохраняет config и TDLib session databases.
-- UI имеет фильтр по уже загруженным чатам, header выбранного чата, initials-placeholder аватар и стилизованные incoming/outgoing bubbles. История пока остаётся одностраничной.
-- При открытии строки header обновляет название и placeholder аватар; CSS provider использует актуальный GTK API.
+- UI имеет фильтр по загруженным чатам, header выбранного чата, лениво загружаемые фото чатов и стилизованные incoming/outgoing bubbles. Chat list и timeline используют `GtkListView`.
+- При открытии строки header обновляет название и фото/инициалы; CSS provider использует актуальный GTK API.
 - UI разделён на `application.rs`, `ui/` компоненты и `services/telegram.rs`; `main.rs` теперь только wiring модулей и запуск.
 - История работает страницами TDLib по 50 сообщений в обоих направлениях. Bridge передаёт request ID через TDLib `@extra`; старые ответы после смены чата отбрасываются.
 - `HistoryWindow` сортирует/дедуплицирует сообщения и удерживает максимум 1 000 в модели. При движении по более длинной переписке окно перемещается в обе стороны.
@@ -55,3 +55,33 @@
 1. Проверить history paging и изменения сообщений на отдельном тестовом аккаунте без личных сообщений в логах.
 2. Визуально проверить HiDPI, клавиатуру и скролл после того, как GNOME capture policy позволит получить локальные скриншоты.
 3. Синтетически нагрузить bounded event queue и остановку backend worker.
+
+## Media & chat UI iteration (2026-11-10)
+
+### Реализовано в коде
+
+- Модель сообщения в client-core теперь хранит отдельный тип: text, photo, document, video, sticker, voice, audio, service или unsupported. Пустой text и неизвестный TDLib content преобразуются в информационные карточки, не в пустые узкие пузыри.
+- TDLib bridge извлекает подписи/названия, MIME, размер, file ID и размеры фото; для фото выбирается небольшой вариант, подходящий для превью.
+- Документы и прочие скачиваемые вложения имеют карточку с именем/метаданными, состоянием загрузки и явной кнопкой. Скачивание идёт асинхронно через TDLib `downloadFile`/`updateFile`; открытие локального файла происходит только после отдельного нажатия пользователя.
+- Фото показываются в сообщении после скачивания выбранного thumbnail; видео, аудио, voice и sticker имеют отдельные типы/иконки и действие download. Воспроизведение не заявляется.
+- Chat summary несёт file ID фотографии. Список переписок переведён на виртуализированный `GtkListView`; загрузка фото запрашивается при привязке видимой строки. Загруженные изображения привязываются к `GtkPicture`, при reuse старый texture/path сбрасывается. Header отображает то же фото или инициалы.
+- `connectionStateReady` теперь отображает `Connected to Telegram.` и не возвращает старую строку ожидания authorization. Сетевые состояния waiting/connecting остаются отдельными статусами.
+- Синтетическое приложение использует отдельный GTK application ID; synthetic media mode не запускает TDLib и не читает настройки/сессию.
+- Добавлены parser tests для пустого/неизвестного content, документа, выбора фото-варианта, file update, chat photo и download request.
+
+### Проверено
+
+- `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets`, `cargo check --workspace`, `cargo test --workspace` (29 tests), `cargo build --release -p telerust`, `bash -n scripts/benchmark-history-ui.sh` прошли.
+- Пять synthetic повторов по 100/1,000/10,000 сообщений и 1,000 с примерно 200 media cards. Медианы находятся в `BENCHMARKS.md`; 1k/10k удержали 1,001 timeline item и максимум 206 bound rows.
+- Ранее отмеченные 8.33% CPU сразу после scroll не сохранялись в следующих интервалах: повторный 1k прогон после первого 3-секундного интервала дал 0–0.33%, повторный 10k — 0–0.33%. Это указывает на короткую отложенную GTK раскладку, не на постоянный idle loop, в данном synthetic сценарии.
+
+### Не проверено / ограничения
+
+- Реальные TDLib avatar/media download, `updateFile` completion/error и открытие через системное приложение не проверены на отдельном test account. Unit tests проверяют JSON преобразования и модели, не сеть.
+- Фото сейчас показываются на выбранном 240p-подобном TDLib варианте; получение полноразмерного изображения и viewer не реализованы. Для video/audio/sticker сделаны метаданные и download action, но нет playback.
+- Media performance scenario строит metadata cards без локальных fixtures/decode/download. Повторные scroll times — endpoint stress, не FPS. Настоящая история/переключение чатов в live UI не измерены.
+- GNOME Wayland не разрешил screenshot capture, поэтому визуальный pixel review/HiDPI и проверка разных размеров окна не выполнены. Синтетический GTK window запускается отдельно от account app.
+- Five-run chat-switch scenario: 12 switches × 1,000 synthetic messages, median 8,490 ms, RSS/PSS/USS median 200,540/72,635/59,828 KiB, 206 peak realized rows and 11,410 row factory creations. GTK geometry was non-zero before stress; this measures synthetic model replacement, not real network chat switching.
+- Channels остаются скрытыми, пока не реализована required sponsored-message поддержка.
+
+Этот раздел supersedes устаревшие ранние пункты HANDOFF, где UI/история описывались как placeholder/одностраничные.

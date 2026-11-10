@@ -77,9 +77,21 @@ Workspace использует GPL-3.0-or-later. После проверки и�
 
 ## Текущий разрыв между ADR и прототипом
 
-Реализация покрывает QR/phone auth prompts, чат-лист, одну страницу истории и явную отправку текста. Logout подключён. Полноценные retry/error transitions, выбор страны и chat search отсутствуют. История рендерится через `GtkListBox` и при обновлении строки пересоздаются; виртуализации нет. Поэтому архитектурные пункты выше описывают выбранные границы и будущие требования, а не полностью реализованные свойства приложения. Сетевой E2E без отдельного тестового аккаунта не проверен.
+Реализация покрывает QR/phone auth prompts, virtualized chat list и message timeline, bounded paginated history, явную отправку текста, typed media cards and TDLib file download actions. Logout подключён. Полноценные retry/error transitions для login, выбор страны и server-side chat search отсутствуют. Сетевой E2E для истории, avatars и media без отдельного тестового аккаунта не проверен; UI screenshots and HiDPI review are blocked by the current GNOME capture policy. См. новый раздел UI/media boundary update и `HANDOFF.md` для точного статуса.
 
 Очередь событий ограничена 256 элементами, но backend публикует через блокирующий `send_blocking`; при замедлении UI это создаёт backpressure, который следует проверить на синтетическом update потоке до утверждения устойчивости под нагрузкой.
+
+## UI/media boundary update (2026-11-10)
+
+`client-core::history::Message` carries a `MessageKind` tagged model and a `MediaFile` record; TDLib JSON decoding stays in `tdlib-bridge`, while GTK renders cards and emits `DownloadFile` commands. File lifecycle updates flow back as typed `FileUpdated`/`FileDownloadFailed` events and update the bounded current history window. This keeps UI code away from TDLib JSON and file request details.
+
+Chat summaries carry only the small photo TDLib file ID and an available local path. `GtkListView` binds visible/near-visible rows and requests a missing photo through the same async file command; `updateFile` refreshes the summary and the row/header picture. Recycled GTK rows clear old filenames to avoid retaining hidden textures. The TDLib managed files database owns on-disk cache; this UI does not yet implement an explicit size/age eviction budget, so long-term disk-cache policy remains open.
+
+Message content is decoded into text, photo, document, video, sticker, voice, audio, service, or unsupported. Empty text and unknown constructors map to informational UI states, never an empty generic bubble. Media remains a metadata card until a TDLib file is available; the user explicitly invokes downloads and system open. Full-resolution photo viewing and playback are not part of this implementation.
+
+`connectionStateReady` maps to a connected status. Authorization transitions remain separately driven by `updateAuthorizationState`; network status events no longer emit the stale phrase “waiting for authorization” after readiness.
+
+This UI iteration uses existing GPL-3.0-or-later project code and TDLib JSON types; no Telegram Desktop/AyuGram source was copied. Their message-document/photo components were consulted for behavior and presentation reference, subject to each upstream `LEGAL` notice. Current implementation and validation gaps are recorded in `HANDOFF.md` and `ROADMAP.md`.
 
 ## Auth QR и logout (2026-11-10)
 
